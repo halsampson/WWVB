@@ -361,3 +361,6 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+/data/3-6am.bin
+/magPh.bin
+/data/Quiet4am.wav
