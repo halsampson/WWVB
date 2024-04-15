@@ -81,12 +81,17 @@ double ntpTime() {
   ntp_p.txTm_s = htonl(ntp_p.txTm_s); // Seconds
   ntp_p.txTm_f = htonl(ntp_p.txTm_f);   // Fraction
 
+// TODO: subtract estimated net delay (typically < 10 ms, so not critical)
+// (also add radio propagation delay to Ft. Collins -- could ping NIST)
 /*
-  FILETIME ft;
-  SystemTimeToFileTime(); // 100 ns???
-
   SYSTEMTIME st;
-  GetSystemTime(&st); // millisec
+  GetSystemTime(&st); // millisec -- sufficient
+
+  FILETIME ft;
+  SystemTimeToFileTime(); // 100 ns + jitter
+
+  QueryPerformanceCounter()
+  QueryPerformanceFrequency()  // 10 MHz
 
   t0 is the client's timestamp of the request packet transmission,
   t1 is the server's timestamp of the request packet reception 

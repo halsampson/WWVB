@@ -72,17 +72,19 @@ bool timeFrame; // else message frame
 int second;
 double avgPhaseOffset;
 
-void checkPhase(double& phase) {
+void checkPhase(double& phase, double  magOffset) {
+  double noiseSquelch = 1 - fabs(magOffset);  // reduce weight in case of mismatched amplitudes (up to +/- 1)
+
   static double avgPhase[60];
   static int avgCount = 1;
-  avgPhase[second] += normalize(phase - avgPhase[second]) / avgCount;
+  avgPhase[second] += normalize(phase - avgPhase[second]) / avgCount * noiseSquelch;
   if (avgCount < MaxAvgCount) ++avgCount;
   if (0) phase = avgPhase[second] = normalize(avgPhase[second]); // use avg vs. noise
 
   double bitPhase = normalize(phase - avgPhaseOffset);  // should be near 0 or +/-PI
   double phaseOfs = fmod(bitPhase + PI/2, PI) - PI/2; // independent of phase reversal
   static int syncAvgCount = 1;
-  avgPhaseOffset += phaseOfs / syncAvgCount;
+  avgPhaseOffset += phaseOfs / syncAvgCount * noiseSquelch;
   if (syncAvgCount < MaxAvgCount) ++syncAvgCount;
 
   bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) > PI / 2;
@@ -105,22 +107,27 @@ int bitCount(unsigned long long bits) {
   return count;
 }
 
+static SYSTEMTIME st;
+
 void checkSync() {
   const int TimeSync = 0x3B0; // 01110110m000 time sync,    inverted: 10001001m111  
   const int MsgSync  = 0x51A; // 10100011m010 message sync, inverted: 01011100m101
 
   int timeSyncCount = 11 - 2 * bitCount(bits ^ TimeSync); // -11..11
   int msgSyncCount  = 11 - 2 * bitCount(bits ^ MsgSync);
+  // get negative bit match counts when phase is inverted
 
-  timeFrame = abs(timeSyncCount) > abs(msgSyncCount) + 2; // highest confidence, prefer message when unsure
-  
+  // ?? seeing other sync words?  messages at minutes 10..15, 40..45
+  bool messageLikely = st.wMinute % 30 >= 10 && st.wMinute % 30 <= 15;
+  // choose best match count, including inverted phase; prefer message display when unsure
+  timeFrame = abs(timeSyncCount) > abs(msgSyncCount) + (messageLikely ? 6 : 1);
   int syncCount = timeFrame ? timeSyncCount : msgSyncCount;
   printf(syncCount >= 0 ? "+" : "-");
-  if (syncCount < -5)    // phase very likely inverted 
-    avgPhaseOffset += PI; // flip phase to match sync word
-  
-  printf("%d", abs(syncCount) - 2);  // confidence level <= 9
+  printf("%d", max(abs(syncCount) - 2, 0));  // confidence level <= 9
   printf(timeFrame ? "t" : "m");
+
+  if (syncCount < -5)     // phase very likely inverted 
+    avgPhaseOffset += PI; // flip phase to match sync word
 }
 
 typedef struct {
@@ -151,13 +158,13 @@ void processBuffer(int b) {
 
   static double avgMagOfs, avgPhaseOfs;
   static int avgCount = 1;
-  avgMagOfs += ((q4.mag - q3.mag) / (q3.mag + q4.mag) - avgMagOfs) / avgCount;
+  double magOffset =(q4.mag - q3.mag) / (q3.mag + q4.mag);
+  avgMagOfs += (magOffset - avgMagOfs) / avgCount;
   avgPhaseOfs += (normalize(q4.ph - q3.ph) - avgPhaseOfs) / avgCount;
   avgPhaseOfs = normalize(avgPhaseOfs);
 
   // TODO: servo avgMagOfs toward 0 vs. clock drift
 
-  static SYSTEMTIME st;
   if (second == 1) {
     printf("\n");
 
@@ -188,7 +195,7 @@ void processBuffer(int b) {
     fwrite(tmagPh, sizeof tmagPh, 1, fMagPh);
   }
 
-  checkPhase(phase); 
+  checkPhase(phase, magOffset); 
 
   if (second == 12 && st.wYear) 
     checkSync();
