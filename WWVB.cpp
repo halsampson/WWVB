@@ -7,9 +7,12 @@ extern const double SampleHz = 191996.73;    // Audio sampling rate measured by 
 // TODO: auto-sync to WWVB sync word
 // TODO: auto-adjust MagnitudeOffset_ms SampleHz based on WWVB amplitude and phase measurments
 
-const int MagnitudeOffset_ms = -100; // as reported in column 4 of output
-const int MaxAvgCount = 8; // adjusts phase servo gain for best lock vs. noise rejection
-const bool UseAveraging = false;  // for noisy evening signal
+// TODO: port to small MCU with precise 240kHz ADC sampling so sin and cos are +/- 1
+
+const int  MagnitudeOffset_ms = -100; // as reported in column 4 of output
+const int  MaxAvgCount = 8; // adjusts phase servo gain for best lock vs. noise rejection
+const bool AverageTimeFrames = true;  // for noisy evening signal
+// TODO: decode Six Minute frames for 15dB better time signal
 
 #include <windows.h>
 #include <conio.h>
@@ -41,7 +44,7 @@ void setMinutesInCentury() {
   int parVector[5] = {0xB3E375, 0x167C6EA, 0x2CF8DD4, 0x12CF8DD, 0x259F1BA};  
   bool time_par[5] = {0};
 
-  unsigned int minute = (unsigned int)(time(NULL) / 60  - 15778080); // in this century
+  unsigned int minute = (unsigned int)(time(NULL) / 60 - 15778080); // in this century
   int bit = 0;
   for (int sec = 46; sec >= 18; --sec) {  // 26 + 3 marker bits
     if (sec % 10 == 9) continue; // marker
@@ -73,20 +76,21 @@ double avgPhaseOffset;
 char frameType = '?'; // sync, time, six-minute, message
 
 void checkPhase(double& phase, double  magOffset) {
-  double noiseSquelch = 1 - fabs(magOffset);  // reduce weight in case of mismatched amplitudes (up to +/- 1)
+  double noiseSquelch = 1 - fabs(magOffset);  // reduce gain in case of mismatched amplitudes (up to +/- 1)
 
-  static double avgPhase[60];
-  static int avgCount = 1;
-  avgPhase[second] += normalize(phase - avgPhase[second]) / avgCount * noiseSquelch;
-  if (avgCount < MaxAvgCount) ++avgCount;
-  if (UseAveraging && frameType == 't' && (second < 43 || second > 46)) 
+  if (AverageTimeFrames && frameType == 't' && (second < 43 || second > 46)) { // avoid averaging minutes LSBs which change
+    static double avgPhase[60]; // seconds
+    static int avgCount = 1;
+    avgPhase[second] += normalize(phase - avgPhase[second]) / avgCount * noiseSquelch;
     phase = avgPhase[second] = normalize(avgPhase[second]); // use avg vs. noise
+    if (second == 58 && avgCount < MaxAvgCount) ++avgCount; // once a minute
+  }
 
   double bitPhase = normalize(phase - avgPhaseOffset);  // should be near 0 or +/-PI
   double phaseOfs = fmod(bitPhase + PI/2, PI) - PI/2; // independent of phase reversal
-  static int syncAvgCount = 1;
-  avgPhaseOffset += phaseOfs / syncAvgCount * noiseSquelch;
-  if (syncAvgCount < MaxAvgCount) ++syncAvgCount;
+  static int phaseAvgCount = 1;
+  avgPhaseOffset += phaseOfs / phaseAvgCount * noiseSquelch;
+  if (phaseAvgCount < MaxAvgCount) ++phaseAvgCount;
 
   bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) > PI / 2;
   int bit = phaseInverted ? 1 : 0; 
@@ -114,7 +118,7 @@ void setFrameType() {
   bool sixMinuteTimeFrame= st.wMinute % 30 >= 10 && st.wMinute % 30 <= 15;
   if (sixMinuteTimeFrame) {
     frameType = 'x';
-    printf("_x");
+    printf("__x");
     return;
   }
 
@@ -123,7 +127,7 @@ void setFrameType() {
 
   int timeSyncCount = 11 - 2 * bitCount(bits ^ TimeSync); // -11..11
   int msgSyncCount  = 11 - 2 * bitCount(bits ^ MsgSync);
-  // get negative bit match counts when phase is inverted
+  //  bit match count is negative when phase is inverted
 
   // choose best match count, including inverted phase; prefer message display when unsure
   frameType = abs(timeSyncCount) > abs(msgSyncCount) + 1 ? 't' : 'm';
@@ -131,7 +135,7 @@ void setFrameType() {
   printf(syncCount >= 0 ? "+" : "-");
   printf("%d%c", max(abs(syncCount) - 2, 0), frameType);  // confidence level <= 9
 
-  if (syncCount < -5)     // phase very likely inverted - rare 
+  if (syncCount <= -7)     // phase very likely inverted - rare except when noisy
     avgPhaseOffset += PI; // flip phase to match sync word
 }
 
@@ -177,7 +181,7 @@ void processBuffer(int b) {
     frameType = 's'; // sync until known
 
     GetSystemTime(&st);
-    printf("%2d ", st.wMinute);
+    printf("%2d:%02d ", st.wHour, st.wMinute);
 
     long long sumSq = 0;
     for (int s = 0; s < BufferSamples; ++s)
@@ -222,7 +226,7 @@ void startAudioIn() {
   SYSTEMTIME st; GetSystemTime(&st);
 
   int ms = (int)(fmod(ntp, 1) * 1000);
-  int sleep_ms = 1000 - ms + MagnitudeOffset_ms;
+  int sleep_ms = 2000 - ms + MagnitudeOffset_ms;
   Sleep(sleep_ms);   // start on 1 second boundary
 
   extern void startWaveIn();
@@ -234,7 +238,7 @@ void startAudioIn() {
   seconds = fmod(ntp + stWis - stNtp, 60);
 
   clockOff = stNtp  - fmod(ntp, 60);  // -: CPU behind
-  printf("%+7.3fs off %7.3fs %7s", clockOff, seconds, ""); 
+  printf("%+7.3fs off %7.3fs %10s", clockOff, seconds, ""); 
   for (int i= 0; i < int(seconds); ++i) printf(" ");
 }
 
