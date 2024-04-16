@@ -10,14 +10,14 @@
 #define AudDeviceName "Realtek High Def" 
 extern const double SampleHz = 191996.71;    // Audio sampling rate measured by recording 1PPS for 100s
 
-// Now: experimental comparison with predicted bits 
+// Now: experimental comparison with predicted rcvdBits 
 // TODO: auto-sync with WWVB sync words
 // TODO: auto-adjust MagnitudeOffset_ms and SampleHz based on WWVB amplitude and phase offsets
 
 // TODO: port to small MCU with precise 240kHz ADC sampling so sin and cos are +/- 1
 
 const int  MagnitudeOffset_ms = -150; // as reported in column 4 of output
-const int  MaxAvgCount = 8;           // adjusts phase servo gain for best lock vs. noise rejection
+const int  MaxAvgCount = 4;           // adjusts phase servo gain for best lock vs. noise rejection
 const bool AverageTimeFrames = false; // for noisy evening signal; problem: sometimes wrong phase inverted state due to noise
 // TODO: decode Six Minute frames for 15dB better time signal
 
@@ -25,7 +25,7 @@ const bool AverageTimeFrames = false; // for noisy evening signal; problem: some
 
 const int WWVBHz = 60000;
 
-int sync[60] = { // -1: 0,  1: 1,  0: not checked
+int frameBit[60] = { // -1: 0,  1: 1,  0: not checked
 // 0, 1,-1, 1,-1,-1,-1, 1, 1, 0, -1, 1,-1,  // Message frame sync
    0,-1, 1, 1, 1,-1, 1, 1,-1, 0, -1,-1,-1, 0, 0, 0, 0, 0, 0, 0, // Time frame sync
   -1, 1, 1,-1,-1,-1,-1, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // minutes: filled in by setMinutesInCentury()
@@ -48,9 +48,9 @@ void setMinutesInCentury() {
 
   unsigned int minute = (unsigned int)(time(NULL) / 60 - 15778080); // in this century
   int bit = 0;
-  for (int sec = 46; sec >= 18; --sec) {  // 26 + 3 marker bits
+  for (int sec = 46; sec >= 18; --sec) {  // 26 + 3 marker rcvdBits
     if (sec % 10 == 9) continue; // marker
-    sync[sec] = minute & 1 ? 1 : -1;
+    frameBit[sec] = minute & 1 ? 1 : -1;
 
     if (minute & 1)
     for (int par = 0; par < 5; ++par)
@@ -61,7 +61,7 @@ void setMinutesInCentury() {
   }
 
   for (int par = 0; par < 5; ++par)
-    sync[17 - par] = time_par[par] ? 1 : -1;
+    frameBit[17 - par] = time_par[par] ? 1 : -1;
 }
 
 const double PI = 3.141592653589793238463;
@@ -71,14 +71,15 @@ double normalize(double phase) {
   return fmod(phase + TwoPI + PI, TwoPI) - PI; // -PI..PI
 }
 
-unsigned long long bits;
+unsigned long long rcvdBits;
 
 int second;
 double avgPhaseOffset;
-char frameType = '?'; // sync, time, six-minute, message
+char frameType = '_'; // sync, time, six-minute, message
 
-void checkPhase(double& phase, double  magOffset) {
-  double noiseSquelch = 1 - fabs(magOffset);  // reduce gain in case of mismatched amplitudes (up to +/- 1)
+void checkPhase(double& phase, double  magOffset, double phaseDifference) {
+  // reduce phase servo gain when 0.25s slices amplitudes and/or phases don't match:
+  double noiseSquelch = (1 - sqrt(fabs(magOffset))) * (1 - sqrt(fabs(phaseDifference) / PI)); 
 
   if (AverageTimeFrames && frameType == 't' && second >= 20 && (second < 43 || second > 46)) { // avoid averaging minutes LSBs which change
     static double avgPhase[60]; // seconds
@@ -96,20 +97,21 @@ void checkPhase(double& phase, double  magOffset) {
 
   bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) >= PI/2;
   int bit = phaseInverted ? 1 : 0; 
-  int syncBit = sync[second];
+
+  int syncBit = frameBit[second];
   if (frameType == 't' && syncBit && bit != syncBit > 0)
     printf("%c", bit ? 'o' : '!'); // miscompare
   else printf("%d", bit);
 
-  bits <<= 1;
-  bits |= bit;
+  rcvdBits <<= 1;
+  rcvdBits |= bit;
 }
 
-int bitCount(unsigned long long bits) { 
+int bitCount(unsigned long long rcvdBits) { 
   int count = 0;
-  while (bits) {
-    count += ((bits & 3) + 1) / 2;
-    bits >>= 2;
+  while (rcvdBits) {
+    count += ((rcvdBits & 3) + 1) / 2;
+    rcvdBits >>= 2;
   }
   return count;
 }
@@ -127,18 +129,17 @@ void setFrameType() {
   const int TimeSync = 0x3B0; // 01110110m000 time sync,    inverted: 10001001m111  
   const int MsgSync  = 0x51A; // 10100011m010 message sync, inverted: 01011100m101
 
-  int timeSyncCount = 11 - 2 * bitCount(bits ^ TimeSync); // -11..11
-  int msgSyncCount  = 11 - 2 * bitCount(bits ^ MsgSync);
-  //  bit match count is negative when phase is inverted
+  int timeSyncBitsMatched = 11 - 2 * bitCount(rcvdBits ^ TimeSync); // inverted match -11..11 all matched
+  int msgSyncBitsMatched  = 11 - 2 * bitCount(rcvdBits ^ MsgSync);
+  //  rcvdBits matched is negative when phase is inverted
 
-  // choose best match count, including inverted phase; prefer message display when unsure
-  frameType = abs(timeSyncCount) > abs(msgSyncCount) + 1 ? 't' : 'm';
-  int syncCount = frameType == 't' ? timeSyncCount : msgSyncCount;
-  printf(syncCount >= 0 ? "+" : "-");
-  printf("%d%c", max(abs(syncCount) - 2, 0), frameType);  // confidence level <= 9
+  // choose best match, including inverted phase; prefer message display when unsure
+  frameType = abs(timeSyncBitsMatched) > abs(msgSyncBitsMatched) + 1 ? 't' : 'm';
+  int syncBitsMatched = frameType == 't' ? timeSyncBitsMatched : msgSyncBitsMatched;
+  if (syncBitsMatched <= -7)    // phase very likely inverted - rare except when noisy
+    avgPhaseOffset += PI; // invert phase to match inverted sync word matched
 
-  if (syncCount <= -7)    // phase very likely inverted - rare except when noisy
-    avgPhaseOffset += PI; // invert phase to match sync word
+  printf("%+d%c", syncBitsMatched - syncBitsMatched / 4, frameType);  // scaled to single digit -9..9
 }
 
 typedef struct {
@@ -169,9 +170,11 @@ void processBuffer(int b) {
 
   static double avgMagOfs, avgPhaseOfs;
   static int avgCount = 1;
-  double magOffset =(q4.mag - q3.mag) / (q3.mag + q4.mag);
+  double magOffset = (q4.mag - q3.mag) / (q3.mag + q4.mag); // 0 if no noise, centered on slices
   avgMagOfs += (magOffset - avgMagOfs) / avgCount;
-  avgPhaseOfs += (normalize(q4.ph - q3.ph) - avgPhaseOfs) / avgCount;
+
+  double phaseDifference = normalize(q4.ph - q3.ph); // 0 if no noise
+  avgPhaseOfs += (phaseDifference - avgPhaseOfs) / avgCount;
   avgPhaseOfs = normalize(avgPhaseOfs);
 
   // TODO: servo avgMagOfs toward 0 vs. clock drift
@@ -179,7 +182,7 @@ void processBuffer(int b) {
   if (second == 1) {
     printf("\n");
 
-    bits = 0;
+    rcvdBits = 0;
     frameType = 's'; // sync until known
 
     GetSystemTime(&st);
@@ -189,9 +192,6 @@ void processBuffer(int b) {
     for (int s = 0; s < BufferSamples; ++s)
       sumSq += wavInBuf[b][s] * wavInBuf[b][s];
     printf("%3.0fdB ", 20 * log10(q3.mag + q4.mag) - 10 * log10((double)sumSq)); // SNR
-
-    double sec = st.wSecond + st.wMilliseconds / 1000.;
-    printf("%.2f", sec - clockOff); 
     printf("%+4.0fms %+5.2f ", avgMagOfs * 500, avgPhaseOfs);  // both s/b near 0
 
     setMinutesInCentury();
@@ -201,12 +201,12 @@ void processBuffer(int b) {
   double phase = normalize((q3.ph + q4.ph) / 2 - q3Phase);
 
   if (st.wYear) {
-    unsigned short hms = st.wHour << 12 | st.wMinute << 6 | st.wSecond;  // 4 + 6 + 6 bits
+    unsigned short hms = st.wHour << 12 | st.wMinute << 6 | st.wSecond;  // 4 + 6 + 6 rcvdBits
     short tmagPh[3] = {(short)hms, (short)((q3.mag + q4.mag) / 100), (short)(phase * 180 / PI)};
     fwrite(tmagPh, sizeof tmagPh, 1, fMagPh);
   }
 
-  checkPhase(phase, magOffset); 
+  checkPhase(phase, magOffset, phaseDifference); 
 
   if (second == 12 && st.wYear) 
     setFrameType();
@@ -239,9 +239,9 @@ void startAudioIn() {
   double stWis = wis.wSecond + wis.wMilliseconds / 1000.;
   seconds = fmod(ntp + stWis - stNtp, 60);
 
-  clockOff = stNtp  - fmod(ntp, 60);  // -: CPU behind
-  printf("%+7.3fs off %7.3fs %10s", clockOff, seconds, ""); 
-  for (int i= 0; i < int(seconds); ++i) printf(" ");
+  clockOff = stNtp - fmod(ntp, 60);  // -: CPU behind
+  printf("%.3fs   (PC clock off %+.3fs)\n UTC", seconds, clockOff); 
+  for (int i= 0; i < 24 + int(seconds); ++i) printf(" ");
 }
 
 int main() {
