@@ -1,18 +1,4 @@
-// WWVB.cpp    WWVB decoding
-
-#define AudDeviceName "Realtek High Def" 
-extern const double SampleHz = 191996.71;    // Audio sampling rate measured by recording 1PPS for 100s
-
-// Now: experimental comparison with predicted bits 
-// TODO: auto-sync to WWVB sync word
-// TODO: auto-adjust MagnitudeOffset_ms SampleHz based on WWVB amplitude and phase measurments
-
-// TODO: port to small MCU with precise 240kHz ADC sampling so sin and cos are +/- 1
-
-const int  MagnitudeOffset_ms = -150; // as reported in column 4 of output
-const int  MaxAvgCount = 8;           // adjusts phase servo gain for best lock vs. noise rejection
-const bool AverageTimeFrames = false; // for noisy evening signal; problem: wrong phase inverted state due to noise
-// TODO: decode Six Minute frames for 15dB better time signal
+// WWVB.cpp    WWVB decoding experiments
 
 #include <windows.h>
 #include <conio.h>
@@ -20,6 +6,22 @@ const bool AverageTimeFrames = false; // for noisy evening signal; problem: wron
 #include <math.h>
 #include <time.h>
 #include <corecrt_share.h>
+
+#define AudDeviceName "Realtek High Def" 
+extern const double SampleHz = 191996.71;    // Audio sampling rate measured by recording 1PPS for 100s
+
+// Now: experimental comparison with predicted bits 
+// TODO: auto-sync with WWVB sync words
+// TODO: auto-adjust MagnitudeOffset_ms and SampleHz based on WWVB amplitude and phase offsets
+
+// TODO: port to small MCU with precise 240kHz ADC sampling so sin and cos are +/- 1
+
+const int  MagnitudeOffset_ms = -150; // as reported in column 4 of output
+const int  MaxAvgCount = 8;           // adjusts phase servo gain for best lock vs. noise rejection
+const bool AverageTimeFrames = false; // for noisy evening signal; problem: sometimes wrong phase inverted state due to noise
+// TODO: decode Six Minute frames for 15dB better time signal
+
+// TODO: Try I Q (I V ?) separation into more common 48kHz stereo sampling
 
 const int WWVBHz = 60000;
 
@@ -87,12 +89,12 @@ void checkPhase(double& phase, double  magOffset) {
   }
 
   double bitPhase = normalize(phase - avgPhaseOffset);  // should be near 0 or +/-PI
-  double phaseOfs = fmod(bitPhase + PI/2, PI) - PI/2;  // independent of phase inversion
+  double phaseOfs = fmod(bitPhase + PI/2, PI) - PI/2;   // independent of phase inversion
   static int phaseAvgCount = 1;
   avgPhaseOffset += phaseOfs / phaseAvgCount * noiseSquelch;
   if (phaseAvgCount < MaxAvgCount) ++phaseAvgCount;
 
-  bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) >= PI / 2;
+  bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) >= PI/2;
   int bit = phaseInverted ? 1 : 0; 
   int syncBit = sync[second];
   if (frameType == 't' && syncBit && bit != syncBit > 0)
