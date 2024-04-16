@@ -1,7 +1,7 @@
 // WWVB.cpp    WWVB decoding
 
 #define AudDeviceName "Realtek High Def" 
-extern const double SampleHz = 191996.73;    // Audio sampling rate measured by recording 1PPS for 100s
+extern const double SampleHz = 191996.71;    // Audio sampling rate measured by recording 1PPS for 100s
 
 // Now: experimental comparison with predicted bits 
 // TODO: auto-sync to WWVB sync word
@@ -9,9 +9,9 @@ extern const double SampleHz = 191996.73;    // Audio sampling rate measured by 
 
 // TODO: port to small MCU with precise 240kHz ADC sampling so sin and cos are +/- 1
 
-const int  MagnitudeOffset_ms = -100; // as reported in column 4 of output
-const int  MaxAvgCount = 8; // adjusts phase servo gain for best lock vs. noise rejection
-const bool AverageTimeFrames = true;  // for noisy evening signal
+const int  MagnitudeOffset_ms = -150; // as reported in column 4 of output
+const int  MaxAvgCount = 8;           // adjusts phase servo gain for best lock vs. noise rejection
+const bool AverageTimeFrames = false; // for noisy evening signal; problem: wrong phase inverted state due to noise
 // TODO: decode Six Minute frames for 15dB better time signal
 
 #include <windows.h>
@@ -78,7 +78,7 @@ char frameType = '?'; // sync, time, six-minute, message
 void checkPhase(double& phase, double  magOffset) {
   double noiseSquelch = 1 - fabs(magOffset);  // reduce gain in case of mismatched amplitudes (up to +/- 1)
 
-  if (AverageTimeFrames && frameType == 't' && (second < 43 || second > 46)) { // avoid averaging minutes LSBs which change
+  if (AverageTimeFrames && frameType == 't' && second >= 20 && (second < 43 || second > 46)) { // avoid averaging minutes LSBs which change
     static double avgPhase[60]; // seconds
     static int avgCount = 1;
     avgPhase[second] += normalize(phase - avgPhase[second]) / avgCount * noiseSquelch;
@@ -87,12 +87,12 @@ void checkPhase(double& phase, double  magOffset) {
   }
 
   double bitPhase = normalize(phase - avgPhaseOffset);  // should be near 0 or +/-PI
-  double phaseOfs = fmod(bitPhase + PI/2, PI) - PI/2; // independent of phase reversal
+  double phaseOfs = fmod(bitPhase + PI/2, PI) - PI/2;  // independent of phase inversion
   static int phaseAvgCount = 1;
   avgPhaseOffset += phaseOfs / phaseAvgCount * noiseSquelch;
   if (phaseAvgCount < MaxAvgCount) ++phaseAvgCount;
 
-  bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) > PI / 2;
+  bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) >= PI / 2;
   int bit = phaseInverted ? 1 : 0; 
   int syncBit = sync[second];
   if (frameType == 't' && syncBit && bit != syncBit > 0)
@@ -135,8 +135,8 @@ void setFrameType() {
   printf(syncCount >= 0 ? "+" : "-");
   printf("%d%c", max(abs(syncCount) - 2, 0), frameType);  // confidence level <= 9
 
-  if (syncCount <= -7)     // phase very likely inverted - rare except when noisy
-    avgPhaseOffset += PI; // flip phase to match sync word
+  if (syncCount <= -7)    // phase very likely inverted - rare except when noisy
+    avgPhaseOffset += PI; // invert phase to match sync word
 }
 
 typedef struct {

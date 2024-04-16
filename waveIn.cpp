@@ -3,7 +3,7 @@
 #include <mmsystem.h>
 #pragma comment(lib, "Winmm.lib")
 
-const double SampleHz = 191996.73;    // Audio sampling rate measured by recording 1PPS for 100s
+const double SampleHz = 191996.71;    // Audio sampling rate measured by recording 1PPS for 100s
 
 const unsigned short MicLevel = 65535;
 // TODO: also set Mic Boost
