@@ -12,13 +12,18 @@ extern const double SampleHz = 191996.71;    // Audio sampling rate measured by 
 
 // Now: experimental comparison with predicted rcvdBits 
 // TODO: auto-sync with WWVB sync words
-// TODO: auto-adjust MagnitudeOffset_ms and SampleHz based on WWVB amplitude and phase offsets
+// TODO: auto-adjust SamplingOffset_ms and SampleHz based on WWVB amplitude and phase offsets
 
 // TODO: port to small MCU with precise 240kHz ADC sampling so sin and cos are +/- 1
 
-const int  MagnitudeOffset_ms = -150; // as reported in column 4 of output
-const int  MaxAvgCount = 4;           // adjusts phase servo gain for best lock vs. noise rejection
-const bool AverageTimeFrames = false; // for noisy evening signal; problem: sometimes wrong phase inverted state due to noise
+const int  SamplingOffset_ms = -1000/4 + 170; // to center sample buffer window on 2nd half (want slice3StartSample ~ BufferSamples / 4)	
+const int  MaxPhaseAvgCount = 4;        // adjusts phase servo gain for best lock vs. noise rejection
+
+const bool AverageTimeFrames = false;   // for noisy evening signal; problem: sometimes wrong phase inverted state due to noise
+const int  MaxNoiseAvgCount = 8;
+
+const int MaxOffsetAvgCount = 64;
+
 // TODO: decode Six Minute frames for 15dB better time signal
 
 // TODO: Try I Q (I V ?) separation into more common 48kHz stereo sampling
@@ -82,18 +87,18 @@ void checkPhase(double& phase, double  magOffset, double phaseDifference) {
   double noiseSquelch = (1 - sqrt(fabs(magOffset))) * (1 - sqrt(fabs(phaseDifference) / PI)); 
 
   if (AverageTimeFrames && frameType == 't' && second >= 20 && (second < 43 || second > 46)) { // avoid averaging minutes LSBs which change
-    static double avgPhase[60]; // seconds
-    static int avgCount = 1;
-    avgPhase[second] += normalize(phase - avgPhase[second]) / avgCount * noiseSquelch;
+    static double avgPhase[60]; // for each second in minute frame
+    static int noiseAvgCount = 1;
+    avgPhase[second] += normalize(phase - avgPhase[second]) / noiseAvgCount * noiseSquelch;
     phase = avgPhase[second] = normalize(avgPhase[second]); // use avg vs. noise
-    if (second == 58 && avgCount < MaxAvgCount) ++avgCount; // once a minute
+    if (second == 58 && noiseAvgCount < MaxNoiseAvgCount) ++noiseAvgCount; // once a minute
   }
 
   double bitPhase = normalize(phase - avgPhaseOffset);  // should be near 0 or +/-PI
   double phaseOfs = fmod(bitPhase + PI/2, PI) - PI/2;   // independent of phase inversion
   static int phaseAvgCount = 1;
   avgPhaseOffset += phaseOfs / phaseAvgCount * noiseSquelch;
-  if (phaseAvgCount < MaxAvgCount) ++phaseAvgCount;
+  if (phaseAvgCount < MaxPhaseAvgCount) ++phaseAvgCount;
 
   bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) >= PI/2;
   int bit = phaseInverted ? 1 : 0; 
@@ -116,10 +121,10 @@ int bitCount(unsigned long long rcvdBits) {
   return count;
 }
 
-static SYSTEMTIME st;
+static SYSTEMTIME systemTime;
 
 void setFrameType() {
-  bool sixMinuteTimeFrame= st.wMinute % 30 >= 10 && st.wMinute % 30 <= 15;
+  bool sixMinuteTimeFrame= systemTime.wMinute % 30 >= 10 && systemTime.wMinute % 30 <= 15;
   if (sixMinuteTimeFrame) {
     frameType = 'x';
     printf("__x");
@@ -157,25 +162,28 @@ MagPhase processSlice(int startSample, int endSample, short* buf) {
 }
 
 extern const int BufferSamples = int(SampleHz + 0.5);
-extern short wavInBuf[2][BufferSamples];  
-double seconds;
-
-double clockOff;  // automatic using NTP; check with https://nist.time.gov/  Your clock is off by: 
+extern short wavInBuf[2][BufferSamples];
+double bufferStartSeconds;
 
 FILE* fMagPh;
 
 void processBuffer(int b) {
-  MagPhase q3 = processSlice(BufferSamples / 2, BufferSamples * 3 / 4, wavInBuf[b]);
-  MagPhase q4 = processSlice(BufferSamples * 3 / 4, BufferSamples, wavInBuf[b]); 
+  // process last half of bit time where amplitude is always high
+  int slice3StartSample = (int)round(fmod((bufferStartSeconds + 0.5) * SampleHz, BufferSamples));  // ~ BufferSamples / 4
+  int slice3EndSample = slice3StartSample + BufferSamples / 4; 
 
-  static double avgMagOfs, avgPhaseOfs;
-  static int avgCount = 1;
-  double magOffset = (q4.mag - q3.mag) / (q3.mag + q4.mag); // 0 if no noise, centered on slices
-  avgMagOfs += (magOffset - avgMagOfs) / avgCount;
+  MagPhase slice3 = processSlice(slice3StartSample, slice3EndSample, wavInBuf[b]); // bit start + 0.5..0.75s
+  MagPhase slice4 = processSlice(slice3EndSample, min(slice3EndSample + BufferSamples / 4, BufferSamples), wavInBuf[b]);  // bit start + 0.75..1.0s 
 
-  double phaseDifference = normalize(q4.ph - q3.ph); // 0 if no noise
-  avgPhaseOfs += (phaseDifference - avgPhaseOfs) / avgCount;
-  avgPhaseOfs = normalize(avgPhaseOfs);
+  static double avgMagOfs, avgPhaseDifference;
+  static int offsetAvgCount = 1;
+  double magOffset = (slice4.mag - slice3.mag) / (slice3.mag + slice4.mag); // 0 if no noise, centered on slices
+  avgMagOfs += (magOffset - avgMagOfs) / offsetAvgCount;
+
+  double phaseDifference = normalize(slice4.ph - slice3.ph); // 0 if no noise
+  avgPhaseDifference += (phaseDifference - avgPhaseDifference) / offsetAvgCount;
+  avgPhaseDifference = normalize(avgPhaseDifference);
+  if (offsetAvgCount < MaxOffsetAvgCount) ++ offsetAvgCount;
 
   // TODO: servo avgMagOfs toward 0 vs. clock drift
 
@@ -185,67 +193,71 @@ void processBuffer(int b) {
     rcvdBits = 0;
     frameType = 's'; // sync until known
 
-    GetSystemTime(&st);
-    printf("%2d:%02d ", st.wHour, st.wMinute);
+    GetSystemTime(&systemTime);
+    printf("%2d:%02d ", systemTime.wHour, systemTime.wMinute);
 
-    long long sumSq = 0;
+    long long sumSquares = 0;
     for (int s = 0; s < BufferSamples; ++s)
-      sumSq += wavInBuf[b][s] * wavInBuf[b][s];
-    printf("%3.0fdB ", 20 * log10(q3.mag + q4.mag) - 10 * log10((double)sumSq)); // SNR
-    printf("%+4.0fms %+5.2f ", avgMagOfs * 500, avgPhaseOfs);  // both s/b near 0
+      sumSquares += wavInBuf[b][s] * wavInBuf[b][s];
+    printf("%3.0fdB ", 20 * log10(slice3.mag + slice4.mag) - 10 * log10((double)sumSquares)); // SNR
+    printf("%+4.0fms %+5.2f ", avgMagOfs * 500, avgPhaseDifference);  // both s/b near 0
 
     setMinutesInCentury();
   }
-  
-  double q3Phase = normalize(TwoPI * WWVBHz * (seconds + 0.5));
-  double phase = normalize((q3.ph + q4.ph) / 2 - q3Phase);
 
-  if (st.wYear) {
-    unsigned short hms = st.wHour << 12 | st.wMinute << 6 | st.wSecond;  // 4 + 6 + 6 rcvdBits
-    short tmagPh[3] = {(short)hms, (short)((q3.mag + q4.mag) / 100), (short)(phase * 180 / PI)};
-    fwrite(tmagPh, sizeof tmagPh, 1, fMagPh);
+  if (systemTime.wYear) { // after systemTime set at first second == 1
+    unsigned short hms = systemTime.wHour << 12 | systemTime.wMinute << 6 | systemTime.wSecond;  // 4 + 6 + 6 rcvdBits
+    short tMagPh[5] = {(short)hms, (short)(slice3.mag / 100), (short)(slice3.ph * 180 / PI), 
+                                   (short)(slice4.mag / 100), (short)(slice4.ph * 180 / PI)};
+    fwrite(tMagPh, sizeof tMagPh, 1, fMagPh);
   }
+  
+  double q3PhaseOfs = normalize(TwoPI * WWVBHz * (bufferStartSeconds + slice3StartSample / SampleHz));
+  double phase = normalize((slice3.ph + slice4.ph) / 2 - q3PhaseOfs);
 
   checkPhase(phase, magOffset, phaseDifference); 
 
-  if (second == 12 && st.wYear) 
+  if (second == 12 && systemTime.wYear) 
     setFrameType();
 
   avgPhaseOffset = normalize(avgPhaseOffset);
 }
 
 void audioReadyCallback(int b) {   
-  second = int(round(fmod(seconds, 60)));
+  second = int(round(fmod(bufferStartSeconds, 60)));
   if (second % 60 != 0 && second % 10 != 9) 
     processBuffer(b);
   else printf("%c", frameType);  // else marker second
-  seconds += BufferSamples / SampleHz;
+  bufferStartSeconds += BufferSamples / SampleHz; // next buffer start time
 }
+
+double clockOffSeconds;
 
 void startAudioIn() {
   extern double ntpTime();
   double ntp = ntpTime();
-  SYSTEMTIME st; GetSystemTime(&st);
+  SYSTEMTIME nearNTP_time; GetSystemTime(&nearNTP_time);
 
   int ms = (int)(fmod(ntp, 1) * 1000);
-  int sleep_ms = 2000 - ms + MagnitudeOffset_ms;
-  Sleep(sleep_ms);   // start on 1 second boundary
+  int sleep_ms = 2000 - ms + SamplingOffset_ms;
+  Sleep(sleep_ms);   // start near 1 second boundary
 
   extern void startWaveIn();
   startWaveIn();  // for consistent phase
-  SYSTEMTIME wis; GetSystemTime(&wis);
+  SYSTEMTIME wavInStartTime; GetSystemTime(&wavInStartTime);
 
-  double stNtp = st.wSecond + st.wMilliseconds / 1000.;
-  double stWis = wis.wSecond + wis.wMilliseconds / 1000.;
-  seconds = fmod(ntp + stWis - stNtp, 60);
+  double stNtp = nearNTP_time.wSecond + nearNTP_time.wMilliseconds / 1000.;
+  double stWis = wavInStartTime.wSecond + wavInStartTime.wMilliseconds / 1000.;
+  bufferStartSeconds = fmod(ntp + stWis - stNtp, 60); // approx recording start time
 
-  clockOff = stNtp - fmod(ntp, 60);  // -: CPU behind
-  printf("%.3fs   (PC clock off %+.3fs)\n UTC", seconds, clockOff); 
-  for (int i= 0; i < 24 + int(seconds); ++i) printf(" ");
+  // check also with https://nist.time.gov/  Your clock is off by: 
+  clockOffSeconds = stNtp - fmod(ntp, 60);  // -: CPU behind
+  printf("%.3fs   (PC clock off %+.3fs)\n UTC", bufferStartSeconds, clockOffSeconds); 
+  for (int i= 0; i < 24 + int(bufferStartSeconds); ++i) printf(" ");
 }
 
 int main() {
-  fMagPh = _fsopen("magPh.bin", "wb", _SH_DENYNO);
+  fMagPh = _fsopen("magPhs.bin", "wb", _SH_DENYNO);
 
   extern void setupAudioIn(const char* deviceName, void (*)(int b));
   setupAudioIn(AudDeviceName, &audioReadyCallback);
@@ -256,8 +268,8 @@ int main() {
     // see also MM_WOM_DONE: https://learn.microsoft.com/en-us/windows/win32/multimedia/processing-the-mm-wom-done-message
     extern bool waveInReady();
     while (!waveInReady()) {
-      SYSTEMTIME st; GetSystemTime(&st);
-      Sleep(500 - (st.wMilliseconds - (int)(clockOff * 1000)) / 2);
+      SYSTEMTIME systemTime; GetSystemTime(&systemTime);
+      Sleep(500 - (systemTime.wMilliseconds - (int)(clockOffSeconds * 1000)) / 2);
     }
 
     if (_kbhit()) switch(_getch()) {
