@@ -71,6 +71,9 @@ void setMinutesInCentury() {
 
   for (int par = 0; par < 5; ++par)
     frameBits[17 - par] = time_par[par];
+
+  const signed char dst[13] = {-1,-1, 0, -1, 1, 1,-1, 1, 1,-1, 1, 1, 0,};  // no leap second, summer DST
+  memcpy(frameBits + 47, dst, sizeof dst);
 }
 
 void set106bitTimingWord(int minuteMod30) {
@@ -295,7 +298,6 @@ int main() {
   fMagPh = _fsopen("magPhs.bin", "wb", _SH_DENYNO);
 
   setupAudioIn(AudDeviceName, &audioReadyCallback);
-
   startAudioIn();
   
   while (1) {
