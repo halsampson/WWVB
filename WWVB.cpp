@@ -109,6 +109,9 @@ unsigned long long rcvdBits;
 int second;
 double avgPhaseOffset, lastCorrection;
 
+double cleanPhaseOffsetTotal;
+int cleanPhaseOffsetCount;
+
 void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
   // reduce phase servo gain when 0.25s slices amplitudes and/or phases don't match:
   double noiseSquelch = (1 - sqrt(fabs(magOffset))) * (1 - sqrt(fabs(phaseDifference) / PI)); 
@@ -127,6 +130,11 @@ void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
   static int phaseAvgCount = 1;
   avgPhaseOffset += lastCorrection = phaseOfs / phaseAvgCount * noiseSquelch;
   if (phaseAvgCount < MaxPhaseAvgCount) ++phaseAvgCount;
+
+  if (fabs(phaseDifference) < PI / 16) { // clean phase measurement threshold
+    cleanPhaseOffsetTotal += phaseOfs;  // per second;  ?biases?
+    ++cleanPhaseOffsetCount;
+  }
 
   bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) >= PI/2;
   int bit = phaseInverted ? 1 : 0; 
@@ -272,6 +280,11 @@ void audioReadyCallback(int b) {
 
 double clockOffSeconds;
 
+void alignOutput() {
+  printf("\n UTC");
+  for (int i= 0; i < 24 + int(bufferStartSeconds) % 60; ++i) printf(" ");
+}
+
 void startAudioIn() {
   extern double ntpTime();
   double ntp = ntpTime();
@@ -290,8 +303,8 @@ void startAudioIn() {
 
   // check also with https://nist.time.gov/  Your clock is off by: 
   clockOffSeconds = fmod(stNtp - fmod(ntp, 60) + 60 + 30,  60) - 30;  // -: CPU behind
-  printf("%.3fs   (PC clock off %+.3fs)\n UTC", bufferStartSeconds, clockOffSeconds); 
-  for (int i= 0; i < 24 + int(bufferStartSeconds); ++i) printf(" ");
+  printf("%.3fs   (PC clock off %+.3fs)", bufferStartSeconds, clockOffSeconds); 
+  alignOutput();
 }
 
 int main() {
@@ -301,16 +314,17 @@ int main() {
   startAudioIn();
   
   while (1) {
-    while (!waveInReady()) {
-      SYSTEMTIME systemTime; GetSystemTime(&systemTime);
-      Sleep(500 - (systemTime.wMilliseconds - (int)(clockOffSeconds * 1000)) / 2);
-    }
-
-    if (_kbhit()) switch(_getch()) {
-      case 's' :
+    switch(_getch()) {
+      case 'f' : if (1 || cleanPhaseOffsetCount > 1000) {
+        double avgPhaseOffsetPerSec = cleanPhaseOffsetTotal / cleanPhaseOffsetCount;
+        double avgCyclesPerSecOffset = avgPhaseOffsetPerSec / TwoPI;   // cycles of WWVBHz per second
+        printf("\nSampleHz off by: %+.4f Hz", avgCyclesPerSecOffset * SampleHz / WWVBHz);  // TODO: check calc by changing SampleHz ***
+        alignOutput();
+        }
+        break;
+      case 's' : // stop
         printf("\nstop\n");
         fclose(fMagPh);
-        extern void stopWaveIn();
         stopWaveIn();
         exit(0);
     }

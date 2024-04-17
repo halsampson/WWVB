@@ -100,6 +100,16 @@ void setMicLevel(int wavInDevID, unsigned short micLevel) {
   result = mixerSetControlDetails((HMIXEROBJ) hMixer, &mcd, MIXER_SETCONTROLDETAILSF_VALUE);
 }
 
+void CALLBACK waveInProc(
+   HWAVEIN   hwi,
+   UINT      uMsg,
+   DWORD_PTR dwInstance,
+   DWORD_PTR dwParam1,
+   DWORD_PTR dwParam2) {
+  if (uMsg == WIM_DATA)
+    waveInReady();
+}
+
 void setupAudioIn(const char* deviceName, void (*waveInRdy)(int b)) {
   waveInRdyCallback = waveInRdy;
 
@@ -123,7 +133,7 @@ void setupAudioIn(const char* deviceName, void (*waveInRdy)(int b)) {
   WAVEFORMATEX wfx = {WAVE_FORMAT_PCM, WAV_IN_CHANNELS,
                       WAV_IN_SAMPLE_HZ, WAV_IN_SAMPLE_HZ * WAV_IN_CHANNELS * BITS_PER_SAMPLE / 8,
                       WAV_IN_CHANNELS * BITS_PER_SAMPLE / 8, BITS_PER_SAMPLE, 0};  
-  MMRESULT res = waveInOpen(&hwi, wavInDevID, &wfx, NULL, 0, WAVE_FORMAT_DIRECT);
+  MMRESULT res = waveInOpen(&hwi, wavInDevID, &wfx, (DWORD_PTR)(VOID*)waveInProc, 0, CALLBACK_FUNCTION | WAVE_FORMAT_DIRECT);
   
   setMicLevel(wavInDevID, MicLevel);
 
