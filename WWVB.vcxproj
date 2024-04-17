@@ -132,6 +132,9 @@
     <ClCompile Include="waveIn.cpp" />
     <ClCompile Include="WWVB.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="waveIn.h" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

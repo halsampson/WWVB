@@ -7,17 +7,19 @@
 #include <time.h>
 #include <corecrt_share.h>
 
-#define AudDeviceName "Realtek High Def" 
-extern const double SampleHz = 191996.71;    // Audio sampling rate measured by recording 1PPS for 100s
+#include "waveIn.h"
 
-// Now: experimental comparison with predicted rcvdBits 
+#define AudDeviceName "Realtek High Def" 
+
+// Now: experimental comparison with predicted rcvdBits to check for errors
 // TODO: auto-sync with WWVB sync words
 // TODO: auto-adjust SamplingOffset_ms and SampleHz based on WWVB amplitude and phase offsets
 
 // TODO: port to small MCU with precise 240kHz ADC sampling so sin and cos are +/- 1
 
 const int  SamplingOffset_ms = -1000/4 + 170; // to center sample buffer window on 2nd half (want slice3StartSample ~ BufferSamples / 4)	
-const int  MaxPhaseAvgCount = 4;        // adjusts phase servo gain for best lock vs. noise rejection
+const int  MaxPhaseAvgCount = 8;  // adjust phase servo gain for best tracking, lock in, and noise rejection
+   // optimum depends on phase noise and drift (ionosphere bounce height) and accuracy of SampleHz  
 
 const bool AverageTimeFrames = false;   // for noisy evening signal; problem: sometimes wrong phase inverted state due to noise
 const int  MaxNoiseAvgCount = 8;
@@ -124,7 +126,7 @@ int bitCount(unsigned long long rcvdBits) {
 static SYSTEMTIME systemTime;
 
 void setFrameType() {
-  bool sixMinuteTimeFrame= systemTime.wMinute % 30 >= 10 && systemTime.wMinute % 30 <= 15;
+  bool sixMinuteTimeFrame = systemTime.wMinute % 30 >= 10 && systemTime.wMinute % 30 <= 15; // minutes 10..15, 40..45
   if (sixMinuteTimeFrame) {
     frameType = 'x';
     printf("__x");
@@ -161,8 +163,6 @@ MagPhase processSlice(int startSample, int endSample, short* buf) {
   return MagPhase {sqrt(pow(i, 2) + pow(q, 2)) / 48, atan2(i, q)}; // -PI..PI
 }
 
-extern const int BufferSamples = int(SampleHz + 0.5);
-extern short wavInBuf[2][BufferSamples];
 double bufferStartSeconds;
 
 FILE* fMagPh;
@@ -180,7 +180,12 @@ void processBuffer(int b) {
   double magOffset = (slice4.mag - slice3.mag) / (slice3.mag + slice4.mag); // 0 if no noise, centered on slices
   avgMagOfs += (magOffset - avgMagOfs) / offsetAvgCount;
 
-  double phaseDifference = normalize(slice4.ph - slice3.ph); // 0 if no noise
+  static double avgMag;
+  avgMag += (slice3.mag + slice4.mag - avgMag) / offsetAvgCount;
+
+  // also show deviation = noise
+
+  double phaseDifference = normalize(slice4.ph - slice3.ph); // 0 if no short-term phase noise/drift
   avgPhaseDifference += (phaseDifference - avgPhaseDifference) / offsetAvgCount;
   avgPhaseDifference = normalize(avgPhaseDifference);
   if (offsetAvgCount < MaxOffsetAvgCount) ++ offsetAvgCount;
@@ -199,7 +204,7 @@ void processBuffer(int b) {
     long long sumSquares = 0;
     for (int s = 0; s < BufferSamples; ++s)
       sumSquares += wavInBuf[b][s] * wavInBuf[b][s];
-    printf("%3.0fdB ", 20 * log10(slice3.mag + slice4.mag) - 10 * log10((double)sumSquares)); // SNR
+    printf("%3.0fdB ", 20 * log10(avgMag) - 10 * log10((double)sumSquares)); // SNR
     printf("%+4.0fms %+5.2f ", avgMagOfs * 500, avgPhaseDifference);  // both s/b near 0
 
     setMinutesInCentury();
@@ -242,7 +247,6 @@ void startAudioIn() {
   int sleep_ms = 2000 - ms + SamplingOffset_ms;
   Sleep(sleep_ms);   // start near 1 second boundary
 
-  extern void startWaveIn();
   startWaveIn();  // for consistent phase
   SYSTEMTIME wavInStartTime; GetSystemTime(&wavInStartTime);
 
@@ -251,7 +255,7 @@ void startAudioIn() {
   bufferStartSeconds = fmod(ntp + stWis - stNtp, 60); // approx recording start time
 
   // check also with https://nist.time.gov/  Your clock is off by: 
-  clockOffSeconds = stNtp - fmod(ntp, 60);  // -: CPU behind
+  clockOffSeconds = fmod(stNtp - fmod(ntp, 60) + 60 + 30,  60) - 30;  // -: CPU behind
   printf("%.3fs   (PC clock off %+.3fs)\n UTC", bufferStartSeconds, clockOffSeconds); 
   for (int i= 0; i < 24 + int(bufferStartSeconds); ++i) printf(" ");
 }
@@ -259,14 +263,11 @@ void startAudioIn() {
 int main() {
   fMagPh = _fsopen("magPhs.bin", "wb", _SH_DENYNO);
 
-  extern void setupAudioIn(const char* deviceName, void (*)(int b));
   setupAudioIn(AudDeviceName, &audioReadyCallback);
 
   startAudioIn();
   
   while (1) {
-    // see also MM_WOM_DONE: https://learn.microsoft.com/en-us/windows/win32/multimedia/processing-the-mm-wom-done-message
-    extern bool waveInReady();
     while (!waveInReady()) {
       SYSTEMTIME systemTime; GetSystemTime(&systemTime);
       Sleep(500 - (systemTime.wMilliseconds - (int)(clockOffSeconds * 1000)) / 2);

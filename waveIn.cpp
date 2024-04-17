@@ -1,9 +1,9 @@
+#include "waveIn.h"
+
 #include <windows.h>
 #include <stdio.h>
 #include <mmsystem.h>
 #pragma comment(lib, "Winmm.lib")
-
-const double SampleHz = 191996.71;    // Audio sampling rate measured by recording 1PPS for 100s
 
 const unsigned short MicLevel = 65535;
 // TODO: also set Mic Boost
@@ -14,8 +14,7 @@ const unsigned short MicLevel = 65535;
 #define BITS_PER_SAMPLE 16
 #define WAV_IN_SAMPLE_HZ 192000  // requested 
 
-const int BufferSamples = int(SampleHz + 0.5);
-short wavInBuf[2][BufferSamples * WAV_IN_CHANNELS];  
+short wavInBuf[2][BufferSamples];
 
 void (*waveInRdyCallback)(int b);
 
