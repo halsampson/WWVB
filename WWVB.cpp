@@ -27,12 +27,14 @@ const int  MaxNoiseAvgCount = 8;
 const int MaxOffsetAvgCount = 64;
 
 // TODO: decode Six Minute frames for 15dB better time signal
+//   106 bit compare
 
 // TODO: Try I Q (I V ?) separation into more common 48kHz stereo sampling
 
 const int WWVBHz = 60000;
 
-int frameBit[60] = { // -1: 0,  1: 1,  0: not checked
+char frameType = '_'; // sync, time, extended, message
+signed char frameBits[60] = { // -1: 0,  1: 1,  0: not checked
 // 0, 1,-1, 1,-1,-1,-1, 1, 1, 0, -1, 1,-1,  // Message frame sync
    0,-1, 1, 1, 1,-1, 1, 1,-1, 0, -1,-1,-1, 0, 0, 0, 0, 0, 0, 0, // Time frame sync
   -1, 1, 1,-1,-1,-1,-1, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // minutes: filled in by setMinutesInCentury()
@@ -51,13 +53,13 @@ void setMinutesInCentury() {
   time_par[4] = sum(modulo 2){time[25,       22,   20,  19,      16, 15,14,13,12,           8,  7,    5, 4,  3,    1  ]
   */
   int parVector[5] = {0xB3E375, 0x167C6EA, 0x2CF8DD4, 0x12CF8DD, 0x259F1BA};  
-  bool time_par[5] = {0};
+  char time_par[5] = {0};
 
   unsigned int minute = (unsigned int)(time(NULL) / 60 - 15778080); // in this century
   int bit = 0;
   for (int sec = 46; sec >= 18; --sec) {  // 26 + 3 marker rcvdBits
     if (sec % 10 == 9) continue; // marker
-    frameBit[sec] = minute & 1 ? 1 : -1;
+    frameBits[sec] = minute & 1;
 
     if (minute & 1)
     for (int par = 0; par < 5; ++par)
@@ -68,7 +70,28 @@ void setMinutesInCentury() {
   }
 
   for (int par = 0; par < 5; ++par)
-    frameBit[17 - par] = time_par[par] ? 1 : -1;
+    frameBits[17 - par] = time_par[par];
+}
+
+void set106bitTimingWord(int minuteMod30) {
+  // six minutes = 360 bits =     127 + 106 + 127
+  const signed char FixedTimingWord[7 + 106 + 7] = {
+   -1,-1,-1,-1,-1,-1,-1,
+    1, 1, 0, 1, 0, 0, 0, 1, 1, 1,
+    0, 1, 0, 1, 1, 0, 0, 1, 0, 1,
+    1, 0, 0, 1, 1, 0, 1, 1, 1, 0,
+    0, 0, 1, 1, 0, 0, 0, 0, 1, 0,
+    1, 1, 0, 1, 0, 0, 1, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 0, 1, 0, 0,
+    0, 0, 1, 0, 1, 1, 1, 0, 0, 0,
+    1, 0, 1, 1, 0, 1, 0, 1, 1, 0,
+    1, 1, 0, 1, 1, 1, 1, 1, 1, 1,
+    1, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+    1, 0, 0, 1, 0, 0,
+   -1,-1,-1,-1,-1,-1,-1,
+  };
+  memcpy(frameBits, FixedTimingWord + (minuteMod30 == 13 ? 60 : 0), sizeof frameBits);
+  frameType = 'T';
 }
 
 const double PI = 3.141592653589793238463;
@@ -81,10 +104,9 @@ double normalize(double phase) {
 unsigned long long rcvdBits;
 
 int second;
-double avgPhaseOffset;
-char frameType = '_'; // sync, time, six-minute, message
+double avgPhaseOffset, lastCorrection;
 
-void checkPhase(double& phase, double  magOffset, double phaseDifference) {
+void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
   // reduce phase servo gain when 0.25s slices amplitudes and/or phases don't match:
   double noiseSquelch = (1 - sqrt(fabs(magOffset))) * (1 - sqrt(fabs(phaseDifference) / PI)); 
 
@@ -96,17 +118,18 @@ void checkPhase(double& phase, double  magOffset, double phaseDifference) {
     if (second == 58 && noiseAvgCount < MaxNoiseAvgCount) ++noiseAvgCount; // once a minute
   }
 
+  // ?? better PID servo to handle short and long-term drift?
   double bitPhase = normalize(phase - avgPhaseOffset);  // should be near 0 or +/-PI
   double phaseOfs = fmod(bitPhase + PI/2, PI) - PI/2;   // independent of phase inversion
   static int phaseAvgCount = 1;
-  avgPhaseOffset += phaseOfs / phaseAvgCount * noiseSquelch;
+  avgPhaseOffset += lastCorrection = phaseOfs / phaseAvgCount * noiseSquelch;
   if (phaseAvgCount < MaxPhaseAvgCount) ++phaseAvgCount;
 
   bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) >= PI/2;
   int bit = phaseInverted ? 1 : 0; 
 
-  int syncBit = frameBit[second];
-  if (frameType == 't' && syncBit && bit != syncBit > 0)
+  int syncBit = frameBits[second];
+  if (tolower(frameType) == 't' && syncBit >= 0 && bit != syncBit)
     printf("%c", bit ? 'o' : '!'); // miscompare
   else printf("%d", bit);
 
@@ -126,10 +149,12 @@ int bitCount(unsigned long long rcvdBits) {
 static SYSTEMTIME systemTime;
 
 void setFrameType() {
-  bool sixMinuteTimeFrame = systemTime.wMinute % 30 >= 10 && systemTime.wMinute % 30 <= 15; // minutes 10..15, 40..45
+  int minuteMod30 = systemTime.wMinute % 30;
+  bool sixMinuteTimeFrame = minuteMod30  >= 10 && minuteMod30 <= 15; // minutes 10..15, 40..45
   if (sixMinuteTimeFrame) {
-    frameType = 'x';
-    printf("__x");
+    if (minuteMod30 != 12 && minuteMod30 != 13)
+      frameType = 'x';
+    printf("__%c", frameType);
     return;
   }
 
@@ -207,7 +232,10 @@ void processBuffer(int b) {
     printf("%3.0fdB ", 20 * log10(avgMag) - 10 * log10((double)sumSquares)); // SNR
     printf("%+4.0fms %+5.2f ", avgMagOfs * 500, avgPhaseDifference);  // both s/b near 0
 
-    setMinutesInCentury();
+    int minuteMod30 = systemTime.wMinute % 30;
+    if (minuteMod30 == 12 || minuteMod30 == 13)
+      set106bitTimingWord(minuteMod30);
+    else setMinutesInCentury();
   }
 
   if (systemTime.wYear) { // after systemTime set at first second == 1
@@ -220,7 +248,7 @@ void processBuffer(int b) {
   double q3PhaseOfs = normalize(TwoPI * WWVBHz * (bufferStartSeconds + slice3StartSample / SampleHz));
   double phase = normalize((slice3.ph + slice4.ph) / 2 - q3PhaseOfs);
 
-  checkPhase(phase, magOffset, phaseDifference); 
+  adjustPhase(phase, magOffset, phaseDifference); 
 
   if (second == 12 && systemTime.wYear) 
     setFrameType();
@@ -232,7 +260,10 @@ void audioReadyCallback(int b) {
   second = int(round(fmod(bufferStartSeconds, 60)));
   if (second % 60 != 0 && second % 10 != 9) 
     processBuffer(b);
-  else printf("%c", frameType);  // else marker second
+  else { // else marker second -- low signal
+    printf("%c", frameType);  
+    avgPhaseOffset += lastCorrection;
+  }
   bufferStartSeconds += BufferSamples / SampleHz; // next buffer start time
 }
 
