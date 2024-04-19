@@ -16,17 +16,19 @@ const unsigned short MicLevel = 65535;
 
 short wavInBuf[2][BufferSamples];
 
-void (*waveInRdyCallback)(int b);
+void (*waveInRdyCallback)(int b, int samplesRecorded);
 
 HWAVEIN hwi;
 WAVEHDR wih[2]; 
+
+int samplesRecorded;
 
 bool waveInReady() {
   bool waveInReady = false;
    for (int b = 0; b < 2; ++b) {
     if (wih[b].dwFlags & WHDR_DONE || !wih[b].dwFlags) {
       if (wih[b].dwFlags & WHDR_DONE) {  
-        (*waveInRdyCallback)(b);
+        (*waveInRdyCallback)(b, samplesRecorded);
         waveInReady = true;
         waveInUnprepareHeader(hwi, &wih[b], sizeof(WAVEHDR));
       }
@@ -106,11 +108,13 @@ void CALLBACK waveInProc(
    DWORD_PTR dwInstance,
    DWORD_PTR dwParam1,
    DWORD_PTR dwParam2) {
-  if (uMsg == WIM_DATA)
+  if (uMsg == WIM_DATA) {
+    samplesRecorded = ((WAVEHDR*)dwParam1)->dwBytesRecorded / sizeof(wavInBuf[0][0]);
     waveInReady();
+  }
 }
 
-void setupAudioIn(const char* deviceName, void (*waveInRdy)(int b)) {
+void setupAudioIn(const char* deviceName, void (*waveInRdy)(int b, int samplesRecorded)) {
   waveInRdyCallback = waveInRdy;
 
   int wavInDevID = -1;

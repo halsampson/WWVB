@@ -12,8 +12,11 @@
 #define AudDeviceName "Realtek High Def" 
 
 // Now: experimental comparison with predicted rcvdBits to check for errors
-// TODO: auto-sync with WWVB sync words
+// TODO: resync rough time offset after non-continuous recording gaps: seen in magnitude offset ms reports
+//   ? message
+
 // TODO: auto-adjust SamplingOffset_ms and SampleHz based on WWVB amplitude and phase offsets
+// TODO: auto-sync with WWVB sync words
 
 // TODO: port to small MCU with precise 240kHz ADC sampling so sin and cos are +/- 1
 
@@ -29,11 +32,11 @@ const int MaxOffsetAvgCount = 64;
 // TODO: decode Six Minute frames for 15dB better time signal
 //   106 bit compare
 
-// TODO: Try I Q (I V ?) separation into more common 48kHz stereo sampling
+// TODO: Try I Q (I V ?) separation into more common 48kHz stereo sampling (although many mic inputs are mono)
 
 const int WWVBHz = 60000;
 
-char frameType = '_'; // sync, time, extended, message
+char frameType = '_'; // sync, time, extended, fixed, message
 signed char frameBits[60] = { // -1: 0,  1: 1,  0: not checked
 // 0, 1,-1, 1,-1,-1,-1, 1, 1, 0, -1, 1,-1,  // Message frame sync
    0,-1, 1, 1, 1,-1, 1, 1,-1, 0, -1,-1,-1, 0, 0, 0, 0, 0, 0, 0, // Time frame sync
@@ -94,7 +97,7 @@ void set106bitTimingWord(int minuteMod30) {
    -1,-1,-1,-1,-1,-1,-1,
   };
   memcpy(frameBits, FixedTimingWord + (minuteMod30 == 13 ? 60 : 0), sizeof frameBits);
-  frameType = 'T';
+  frameType = 'f';
 }
 
 const double PI = 3.141592653589793238463;
@@ -140,7 +143,7 @@ void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
   int bit = phaseInverted ? 1 : 0; 
 
   int syncBit = frameBits[second];
-  if (tolower(frameType) == 't' && syncBit >= 0 && bit != syncBit)
+  if ((frameType == 't' || frameType == 'f') && syncBit >= 0 && bit != syncBit) // check known bits
     printf("%c", bit ? 'o' : '!'); // miscompare
   else printf("%d", bit);
 
@@ -267,15 +270,17 @@ void processBuffer(int b) {
   avgPhaseOffset = normalize(avgPhaseOffset);
 }
 
-void audioReadyCallback(int b) {   
+void audioReadyCallback(int b, int samplesRecorded) {   
   second = int(round(fmod(bufferStartSeconds, 60)));
-  if (second % 60 != 0 && second % 10 != 9) 
-    processBuffer(b);
-  else { // else marker second -- low signal
+  if (second % 60 != 0 && second % 10 != 9) { 
+    if (samplesRecorded == BufferSamples)
+      processBuffer(b);
+    else printf("b");
+  } else { // else marker second -- low signal
     printf("%c", frameType);  
     avgPhaseOffset += lastCorrection;
   }
-  bufferStartSeconds += BufferSamples / SampleHz; // next buffer start time
+  bufferStartSeconds += samplesRecorded / SampleHz; // next buffer start time
 }
 
 double clockOffSeconds;
