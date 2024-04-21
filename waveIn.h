@@ -1,6 +1,6 @@
 #pragma once
 
-const double SampleHz = 191996.753;          // Audio sampling rate
+const double SampleHz = 191996.635;          // Audio sampling rate
   // Use 1PPScalib to calibrate
   // Use 'f' key to see estimated error
 

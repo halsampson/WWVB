@@ -21,7 +21,7 @@
 // TODO: port to small MCU with precise 240kHz ADC sampling so sin and cos are +/- 1
 
 const int  SamplingOffset_ms = -1000/4 + 170; // to center sample buffer window on 2nd half (want slice3StartSample ~ BufferSamples / 4)	
-const int  MaxPhaseAvgCount = 8;  // adjust phase servo gain for best tracking, lock in, and noise rejection
+const int  MaxPhaseAvgCount = 32;  // adjust phase servo gain for best tracking, lock in, and noise rejection
    // optimum depends on phase noise and drift (ionosphere bounce height) and accuracy of SampleHz  
 
 const bool AverageTimeFrames = false;   // for noisy evening signal; problem: sometimes wrong phase inverted state due to noise
@@ -127,9 +127,10 @@ void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
     if (second == 58 && noiseAvgCount < MaxNoiseAvgCount) ++noiseAvgCount; // once a minute
   }
 
-  // ?? better PID servo to handle short and long-term drift?
+  // ?? better PID servo to handle short and long-term drifts vs. noise?
   double bitPhase = normalize(phase - avgPhaseOffset);  // should be near 0 or +/-PI
-  double phaseOfs = fmod(bitPhase + PI/2, PI) - PI/2;   // independent of phase inversion
+  double phaseOfs = fmod(bitPhase + TwoPI + PI/2, PI) - PI/2;   // -PI/2..PI/2, independent of phase inversion
+
   static int phaseAvgCount = 1;
   avgPhaseOffset += lastCorrection = phaseOfs / phaseAvgCount * noiseSquelch;
   if (phaseAvgCount < MaxPhaseAvgCount) ++phaseAvgCount;
@@ -182,8 +183,8 @@ void setFrameType() {
   // choose best match, including inverted phase; prefer message display when unsure
   frameType = abs(timeSyncBitsMatched) > abs(msgSyncBitsMatched) + 1 ? 't' : 'm';
   int syncBitsMatched = frameType == 't' ? timeSyncBitsMatched : msgSyncBitsMatched;
-  if (syncBitsMatched <= -7)    // phase very likely inverted - rare except when noisy
-    avgPhaseOffset += PI; // invert phase to match inverted sync word matched
+  if (syncBitsMatched <= -7)    // sync word phase very likely inverted -- should be rare except when noisy
+    avgPhaseOffset += PI; // invert phase
 
   printf("%+d%c", syncBitsMatched - syncBitsMatched / 4, frameType);  // scaled to single digit -9..9
 }
@@ -207,38 +208,16 @@ double bufferStartSeconds;
 FILE* fMagPh;
 
 void processBuffer(int b) {
-  // process last half of bit time where amplitude is always high
-  int slice3StartSample = (int)round(fmod((bufferStartSeconds + 0.5) * SampleHz, BufferSamples));  // ~ BufferSamples / 4
-  int slice3EndSample = slice3StartSample + BufferSamples / 4; 
+  static double avgMag, avgMagOfs, avgPhaseDifference;
 
-  MagPhase slice3 = processSlice(slice3StartSample, slice3EndSample, wavInBuf[b]); // bit start + 0.5..0.75s
-  MagPhase slice4 = processSlice(slice3EndSample, min(slice3EndSample + BufferSamples / 4, BufferSamples), wavInBuf[b]);  // bit start + 0.75..1.0s 
-
-  static double avgMagOfs, avgPhaseDifference;
-  static int offsetAvgCount = 1;
-  double magOffset = (slice4.mag - slice3.mag) / (slice3.mag + slice4.mag); // 0 if no noise, centered on slices
-  avgMagOfs += (magOffset - avgMagOfs) / offsetAvgCount;
-
-  static double avgMag;
-  avgMag += (slice3.mag + slice4.mag - avgMag) / offsetAvgCount;
-
-  // also show deviation = noise
-
-  double phaseDifference = normalize(slice4.ph - slice3.ph); // 0 if no short-term phase noise/drift
-  avgPhaseDifference += (phaseDifference - avgPhaseDifference) / offsetAvgCount;
-  avgPhaseDifference = normalize(avgPhaseDifference);
-  if (offsetAvgCount < MaxOffsetAvgCount) ++ offsetAvgCount;
-
-  // TODO: servo avgMagOfs toward 0 vs. clock drift
-
-  if (second == 1) {
+  if (second == 0) {
     printf("\n");
 
     rcvdBits = 0;
     frameType = 's'; // sync until known
 
     GetSystemTime(&systemTime);
-    printf("%2d:%02d ", systemTime.wHour, systemTime.wMinute);
+    printf("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
 
     long long sumSquares = 0;
     for (int s = 0; s < BufferSamples; ++s)
@@ -252,6 +231,34 @@ void processBuffer(int b) {
     else setMinutesInCentury();
   }
 
+  if (second % 60 == 0 || second % 10 == 9) { // marker second -- low signal
+    printf("%c", frameType);  
+    avgPhaseOffset += lastCorrection;
+    return;
+  }
+
+  // process last half of bit time where amplitude is always high
+  int slice3StartSample = (int)round(fmod((bufferStartSeconds + 0.5) * SampleHz, BufferSamples));  // ~ BufferSamples / 4
+  int slice3EndSample = slice3StartSample + BufferSamples / 4; 
+
+  MagPhase slice3 = processSlice(slice3StartSample, slice3EndSample, wavInBuf[b]); // bit start + 0.5..0.75s
+  MagPhase slice4 = processSlice(slice3EndSample, min(slice3EndSample + BufferSamples / 4, BufferSamples), wavInBuf[b]);  // bit start + 0.75..1.0s 
+
+
+  static int offsetAvgCount = 1;
+  double magOffset = (slice4.mag - slice3.mag) / (slice3.mag + slice4.mag); // 0 if no noise, centered on slices
+  avgMagOfs += (magOffset - avgMagOfs) / offsetAvgCount;
+  // TODO: servo avgMagOfs toward 0 vs. clock drift
+
+  avgMag += (slice3.mag + slice4.mag - avgMag) / offsetAvgCount;
+
+  // also show deviation = noise
+
+  double phaseDifference = normalize(slice4.ph - slice3.ph); // 0 if no short-term phase noise/drift
+  avgPhaseDifference += (phaseDifference - avgPhaseDifference) / offsetAvgCount;
+  avgPhaseDifference = normalize(avgPhaseDifference);
+  if (offsetAvgCount < MaxOffsetAvgCount) ++ offsetAvgCount;
+
   if (systemTime.wYear) { // after systemTime set at first second == 1
     unsigned short hms = systemTime.wHour << 12 | systemTime.wMinute << 6 | systemTime.wSecond;  // 4 + 6 + 6 rcvdBits
     short tMagPh[5] = {(short)hms, (short)(slice3.mag / 100), (short)(slice3.ph * 180 / PI), 
@@ -264,30 +271,29 @@ void processBuffer(int b) {
 
   adjustPhase(phase, magOffset, phaseDifference); 
 
-  if (second == 12 && systemTime.wYear) 
+  if (second == 12 && systemTime.wYear) // sync done
     setFrameType();
 
   avgPhaseOffset = normalize(avgPhaseOffset);
 }
 
-void audioReadyCallback(int b, int samplesRecorded) {   
-  second = int(round(fmod(bufferStartSeconds, 60)));
-  if (second % 60 != 0 && second % 10 != 9) { 
-    if (samplesRecorded == BufferSamples)
-      processBuffer(b);
-    else printf("b");
-  } else { // else marker second -- low signal
-    printf("%c", frameType);  
+void audioReadyCallback(int b, int samplesRecorded) {
+  second = int(fmod(bufferStartSeconds + 0.5, 60));
+  if (samplesRecorded == BufferSamples)
+    processBuffer(b);
+  else {
+    printf("b");
     avgPhaseOffset += lastCorrection;
   }
   bufferStartSeconds += samplesRecorded / SampleHz; // next buffer start time
+  // TODO: samples might be discontinuous -- check for sudden jump in avgMagOffset and resync
 }
 
 double clockOffSeconds;
 
 void alignOutput() {
   printf("\n UTC");
-  for (int i= 0; i < 24 + int(bufferStartSeconds) % 60; ++i) printf(" ");
+  for (int i= 0; i < 31 + int(bufferStartSeconds) % 60; ++i) printf(" ");
 }
 
 void startAudioIn() {
@@ -313,7 +319,7 @@ void startAudioIn() {
 }
 
 int main() {
-  fMagPh = _fsopen("magPhs.bin", "wb", _SH_DENYNO);
+  fMagPh = _fsopen("magPhs.bin", "wb", _SH_DENYNO); 
 
   setupAudioIn(AudDeviceName, &audioReadyCallback);
   startAudioIn();
