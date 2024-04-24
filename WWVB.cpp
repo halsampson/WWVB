@@ -1,4 +1,6 @@
-// WWVB.cpp    WWVB decoding experiments
+// WWVB.cpp       WWVB decoding experiments
+// 
+// Experiment comparing received with calculated bits to check error rates
 
 #include <windows.h>
 #include <conio.h>
@@ -11,23 +13,28 @@
 
 #define AudDeviceName "Realtek High Def" 
 
-// Now: experimental comparison with predicted rcvdBits to check for errors
-// TODO: resync rough time offset after non-continuous recording gaps: seen in magnitude offset ms reports
-//   ? message
+// #define START_AT_HOUR 4
+
+// TODO: +/- count of Fixed bits -- never message?
+
+
+// TODO: resync rough ms offset after recorded audio gaps: seen in magnitude offset ms reports *****
+//   or Windows, ... fix for audio glitches??
+// 
+// TODO: auto-sync seconds: initial sync words search
 
 // TODO: auto-adjust SamplingOffset_ms and SampleHz based on WWVB amplitude and phase offsets
-// TODO: auto-sync with WWVB sync words
 
-// TODO: port to small MCU with precise 240kHz ADC sampling so sin and cos are +/- 1
+// TODO: port to small MCU with precise 240 kHz ADC sampling so sin and cos are +/- 1
 
 const int  SamplingOffset_ms = -1000/4 + 170; // to center sample buffer window on 2nd half (want slice3StartSample ~ BufferSamples / 4)	
-const int  MaxPhaseAvgCount = 32;  // adjust phase servo gain for best tracking, lock in, and noise rejection
+const int  MaxPhaseAvgCount = 8;  // TODO: adjust phase servo gain for best tracking, lock in, and noise rejection
    // optimum depends on phase noise and drift (ionosphere bounce height) and accuracy of SampleHz  
 
 const bool AverageTimeFrames = false;   // for noisy evening signal; problem: sometimes wrong phase inverted state due to noise
 const int  MaxNoiseAvgCount = 8;
 
-const int MaxOffsetAvgCount = 64;
+const int MaxOffsetAvgCount = 60 - 6 - 1; // decaying average over reporting minute
 
 // TODO: decode Six Minute frames for 15dB better time signal
 //   106 bit compare
@@ -115,6 +122,23 @@ double avgPhaseOffset, lastCorrection;
 double cleanPhaseOffsetTotal;
 int cleanPhaseOffsetCount;
 
+FILE* fLog;
+
+void printfLog(const char* format, ...) {
+  va_list args; va_start(args, format);
+  static char line[256];
+  static int linePos;
+  int start = linePos;
+  linePos += vsprintf_s(line + linePos, sizeof line - linePos, format, args);
+  va_end(args);
+  printf("%s", line + start);
+  if (line[linePos - 1] == '\n') {
+    if (!fLog) fLog = _fsopen("logAll.txt", "ab", _SH_DENYNO);
+    if (fLog) fwrite(line, 1, linePos, fLog);
+    linePos = 0;
+  }
+}
+
 void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
   // reduce phase servo gain when 0.25s slices amplitudes and/or phases don't match:
   double noiseSquelch = (1 - sqrt(fabs(magOffset))) * (1 - sqrt(fabs(phaseDifference) / PI)); 
@@ -145,8 +169,8 @@ void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
 
   int syncBit = frameBits[second];
   if ((frameType == 't' || frameType == 'f') && syncBit >= 0 && bit != syncBit) // check known bits
-    printf("%c", bit ? 'o' : '!'); // miscompare
-  else printf("%d", bit);
+    printfLog("%c", bit ? 'o' : '!'); // miscompare
+  else printfLog("%d", bit);
 
   rcvdBits <<= 1;
   rcvdBits |= bit;
@@ -164,29 +188,36 @@ int bitCount(unsigned long long rcvdBits) {
 static SYSTEMTIME systemTime;
 
 void setFrameType() {
-  int minuteMod30 = systemTime.wMinute % 30;
-  bool sixMinuteTimeFrame = minuteMod30  >= 10 && minuteMod30 <= 15; // minutes 10..15, 40..45
-  if (sixMinuteTimeFrame) {
-    if (minuteMod30 != 12 && minuteMod30 != 13)
-      frameType = 'x';
-    printf("__%c", frameType);
+  if (frameType == 'x') {
+    printfLog("__x");
     return;
   }
 
-  const int TimeSync = 0x3B0; // 01110110m000 time sync,    inverted: 10001001m111  
-  const int MsgSync  = 0x51A; // 10100011m010 message sync, inverted: 01011100m101
+  if (frameType == 'f' && systemTime.wMinute % 30 == 12) {
+    printfLog("__f");
+    return;  
+  }
 
-  int timeSyncBitsMatched = 11 - 2 * bitCount(rcvdBits ^ TimeSync); // inverted match -11..11 all matched
-  int msgSyncBitsMatched  = 11 - 2 * bitCount(rcvdBits ^ MsgSync);
-  //  rcvdBits matched is negative when phase is inverted
+  int syncBitsMatched;
 
-  // choose best match, including inverted phase; prefer message display when unsure
-  frameType = abs(timeSyncBitsMatched) > abs(msgSyncBitsMatched) + 1 ? 't' : 'm';
-  int syncBitsMatched = frameType == 't' ? timeSyncBitsMatched : msgSyncBitsMatched;
+  if (frameType == 'f') { // minute 13 or 43 -- fixed bits
+    syncBitsMatched = 11 - 2 * bitCount(rcvdBits ^ 0b01010000011);
+  } else { // can be time or message
+    const int TimeSync = 0b01110110000; // 01110110m000 time sync,    inverted: 10001001m111  
+    const int MsgSync  = 0b10100011010; // 10100011m010 message sync, inverted: 01011100m101
+
+    int timeSyncBitsMatched = 11 - 2 * bitCount(rcvdBits ^ TimeSync); // inverted match -11..11 all matched
+    int msgSyncBitsMatched  = 11 - 2 * bitCount(rcvdBits ^ MsgSync);
+    //  rcvdBits matched is negative when phase is inverted
+
+    // choose best match, including inverted phase -- most likely time
+    frameType = abs(timeSyncBitsMatched) >= abs(msgSyncBitsMatched) ? 't' : 'm';
+    syncBitsMatched = frameType == 't' ? timeSyncBitsMatched : msgSyncBitsMatched;
+  }
   if (syncBitsMatched <= -7)    // sync word phase very likely inverted -- should be rare except when noisy
     avgPhaseOffset += PI; // invert phase
 
-  printf("%+d%c", syncBitsMatched - syncBitsMatched / 4, frameType);  // scaled to single digit -9..9
+  printfLog("%+d%c", syncBitsMatched - syncBitsMatched / 4, frameType);  // scaled to single digit -9..9
 }
 
 typedef struct {
@@ -211,30 +242,32 @@ void processBuffer(int b) {
   static double avgMag, avgMagOfs, avgPhaseDifference;
 
   if (second == 0) {
-    printf("\n");
+    printfLog("\n");
 
     rcvdBits = 0;
     frameType = 's'; // sync until known
 
     GetSystemTime(&systemTime);
-    printf("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
+    printfLog("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
 
     long long sumSquares = 0;
     for (int s = 0; s < BufferSamples; ++s)
       sumSquares += wavInBuf[b][s] * wavInBuf[b][s];
-    printf("%3.0fdB ", 20 * log10(avgMag) - 10 * log10((double)sumSquares)); // SNR
-    printf("%+4.0fms %+5.2f ", avgMagOfs * 500, avgPhaseDifference);  // both s/b near 0
+    printfLog("%3.0fdB ", 20 * log10(avgMag) - 10 * log10((double)sumSquares)); // SNR
+    printfLog("%+4.0fms %+5.1f ", avgMagOfs * 500, avgPhaseDifference * 180 / PI);  // both s/b near 0
 
     int minuteMod30 = systemTime.wMinute % 30;
     if (minuteMod30 == 12 || minuteMod30 == 13)
       set106bitTimingWord(minuteMod30);
+    else if (minuteMod30 >= 10 && minuteMod30 <= 15)
+      frameType = 'x';
     else setMinutesInCentury();
   }
 
   if (second % 60 == 0 || second % 10 == 9) { // marker second -- low signal
-    printf("%c", frameType);  
+    printfLog("%c", frameType);  
     avgPhaseOffset += lastCorrection;
-    return;
+    return; // don't process low signal marker seconds
   }
 
   // process last half of bit time where amplitude is always high
@@ -243,7 +276,6 @@ void processBuffer(int b) {
 
   MagPhase slice3 = processSlice(slice3StartSample, slice3EndSample, wavInBuf[b]); // bit start + 0.5..0.75s
   MagPhase slice4 = processSlice(slice3EndSample, min(slice3EndSample + BufferSamples / 4, BufferSamples), wavInBuf[b]);  // bit start + 0.75..1.0s 
-
 
   static int offsetAvgCount = 1;
   double magOffset = (slice4.mag - slice3.mag) / (slice3.mag + slice4.mag); // 0 if no noise, centered on slices
@@ -293,7 +325,7 @@ double clockOffSeconds;
 
 void alignOutput() {
   printf("\n UTC");
-  for (int i= 0; i < 31 + int(bufferStartSeconds) % 60; ++i) printf(" ");
+  for (int i= 0; i < 32 + int(bufferStartSeconds) % 60; ++i) printf(" ");
 }
 
 void startAudioIn() {
@@ -319,6 +351,15 @@ void startAudioIn() {
 }
 
 int main() {
+
+
+#ifdef START_AT_HOUR // PDT: delayed clean night higher SNR start
+  const int SecsPerHour = 60 * 60;
+  const int SecsPerDay = 24 * 60 * 60;
+  int secsUntilStart = ((START_AT_HOUR + 7) * SecsPerHour - time(NULL) % SecsPerDay + SecsPerDay) % SecsPerDay;
+  Sleep(1000 * secsUntilStart);
+#endif
+
   fMagPh = _fsopen("magPhs.bin", "wb", _SH_DENYNO); 
 
   setupAudioIn(AudDeviceName, &audioReadyCallback);
@@ -335,7 +376,8 @@ int main() {
         break;
       case 's' : // stop
         printf("\nstop\n");
-        fclose(fMagPh);
+        if (fMagPh) fclose(fMagPh);
+        if (fLog) fclose(fLog);
         stopWaveIn();
         exit(0);
     }

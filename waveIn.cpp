@@ -110,7 +110,7 @@ void CALLBACK waveInProc(
    DWORD_PTR dwParam2) {
   if (uMsg == WIM_DATA) {
     samplesRecorded = ((WAVEHDR*)dwParam1)->dwBytesRecorded / sizeof(wavInBuf[0][0]);
-    waveInReady();
+    waveInReady(); // ((WAVEHDR*)dwParam1)->lpData;
   }
 }
 
@@ -144,10 +144,30 @@ void setupAudioIn(const char* deviceName, void (*waveInRdy)(int b, int samplesRe
   waveInReady();
 }
 
+#define POWER_REQ
+HANDLE hPCR;
+
 void startWaveIn() {
   MMRESULT res = waveInStart(hwi);
+
+#ifdef POWER_REQ
+  REASON_CONTEXT reason = {POWER_REQUEST_CONTEXT_VERSION, POWER_REQUEST_CONTEXT_SIMPLE_STRING, };
+  wchar_t reason_string[] = L"Prevent audio gaps";
+  reason.Reason.SimpleReasonString = reason_string; 
+  HANDLE hPCR = PowerCreateRequest(&reason);
+  if (!PowerSetRequest(hPCR, PowerRequestSystemRequired)) printf("PSR error %d\n", GetLastError());
+#endif
+
+ // SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED); // don't sleep, run in background
+ // no help - still get audio buffer discontinuities
+
 }
 
 void stopWaveIn() {
   waveInStop(hwi);
+#ifdef POWER_REQ
+  PowerClearRequest(hPCR, PowerRequestSystemRequired);
+  CloseHandle(hPCR);
+#endif
+  // SetThreadExecutionState(ES_CONTINUOUS);
 }
