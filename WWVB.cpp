@@ -13,27 +13,26 @@
 
 #define AudDeviceName "Realtek High Def" 
 
-// #define START_AT_HOUR 4
-
-// TODO: +/- count of Fixed bits -- never message?
-
+// #define START_AT_HOUR 1 
 
 // TODO: resync rough ms offset after recorded audio gaps: seen in magnitude offset ms reports *****
-//   or Windows, ... fix for audio glitches??
+//   or Windows fix audio glitches
+//   or port to Linux
 // 
 // TODO: auto-sync seconds: initial sync words search
 
 // TODO: auto-adjust SamplingOffset_ms and SampleHz based on WWVB amplitude and phase offsets
 
-// TODO: port to small MCU with precise 240 kHz ADC sampling so sin and cos are +/- 1
+// TODO: port to small MCU with precise 240 kHz ADC sampling so sin and cos values are only -1,0,+1
 
-const int  SamplingOffset_ms = -1000/4 + 170; // to center sample buffer window on 2nd half (want slice3StartSample ~ BufferSamples / 4)	
 const int  MaxPhaseAvgCount = 8;  // TODO: adjust phase servo gain for best tracking, lock in, and noise rejection
-   // optimum depends on phase noise and drift (ionosphere bounce height) and accuracy of SampleHz  
+   // gain is reduced by noise squelch
+   // optimum depends on phase noise and drift (ionosphere bounce height), accuracy of SampleHz, ...
 
 const bool AverageTimeFrames = false;   // for noisy evening signal; problem: sometimes wrong phase inverted state due to noise
 const int  MaxNoiseAvgCount = 8;
 
+const int  SamplingOffset_ms = -1000/4 + 170; // to center sample buffer window on 2nd half (want slice3StartSample ~ BufferSamples / 4)	
 const int MaxOffsetAvgCount = 60 - 6 - 1; // decaying average over reporting minute
 
 // TODO: decode Six Minute frames for 15dB better time signal
@@ -136,6 +135,7 @@ void printfLog(const char* format, ...) {
     if (!fLog) fLog = _fsopen("logAll.txt", "ab", _SH_DENYNO);
     if (fLog) fwrite(line, 1, linePos, fLog);
     linePos = 0;
+    // fflush(fLog);
   }
 }
 

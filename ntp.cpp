@@ -46,7 +46,7 @@ void err(const char *message) {
 double ntpTime() {
   WSADATA wsaData;
   if (WSAStartup(MAKEWORD(2, 2), &wsaData)) 
-    err("WSAStartup fail");
+    err("WSAStartup");
 
   ntp_packet ntp_p = {0};
   ntp_p.vn = 3;
@@ -63,17 +63,17 @@ double ntpTime() {
   struct sockaddr_in addr = {0};
   addr.sin_family = AF_INET;
   memcpy(&addr.sin_addr.s_addr, ip->h_addr_list[0], ip->h_length);
-  addr.sin_port = htons(123); // UDP
+  addr.sin_port = htons(123); // NTP
   if (connect(socket_fd, (struct sockaddr *) &addr, sizeof(addr)) < 0)
       err("connect");
 
   uint32_t t4 = (uint32_t)time(NULL) + NTP_TIMESTAMP_70_YEARS;
   ntp_p.txTm_s = ntohl(t4);
   if (send(socket_fd, (char *) &ntp_p, sizeof(ntp_packet), 0) < 0)
-      err("send to socket");
+      err("send sock");
 
   if (recv(socket_fd, (char *) &ntp_p, sizeof(ntp_packet), 0) < 0)
-      err("read socket");
+      err("recv sock");
 
   closesocket(socket_fd);
   WSACleanup();
