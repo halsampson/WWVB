@@ -17,9 +17,10 @@
 
 // TODO: resync rough ms offset after recorded audio gaps: seen in magnitude offset ms reports *****
 //   or Windows fix audio glitches
-//   or port to Linux
+//   or port to Linux or MCU
 // 
-// TODO: auto-sync seconds: initial sync words search
+// TODO: auto-sync start of seconds, minutes: initial sync words search
+//   see AM decoding at https://github.com/jepler/cwwvb
 
 // TODO: auto-adjust SamplingOffset_ms and SampleHz based on WWVB amplitude and phase offsets
 
@@ -29,10 +30,10 @@ const int  MaxPhaseAvgCount = 8;  // TODO: adjust phase servo gain for best trac
    // gain is reduced by noise squelch
    // optimum depends on phase noise and drift (ionosphere bounce height), accuracy of SampleHz, ...
 
-const bool AverageTimeFrames = false;   // for noisy evening signal; problem: sometimes wrong phase inverted state due to noise
+const bool AverageTimeFrames = false; // for noisy evening signal; problem: sometimes stuck in wrong phase inversion state due to noise
 const int  MaxNoiseAvgCount = 8;
 
-const int  SamplingOffset_ms = -1000/4 + 170; // to center sample buffer window on 2nd half (want slice3StartSample ~ BufferSamples / 4)	
+const int SamplingOffset_ms = -1000/4 + 170; // to center sample buffer on 2nd half of bit time (want slice3StartSample ~ BufferSamples / 4)
 const int MaxOffsetAvgCount = 60 - 6 - 1; // decaying average over reporting minute
 
 // TODO: decode Six Minute frames for 15dB better time signal
@@ -291,7 +292,7 @@ void processBuffer(int b) {
   avgPhaseDifference = normalize(avgPhaseDifference);
   if (offsetAvgCount < MaxOffsetAvgCount) ++ offsetAvgCount;
 
-  if (systemTime.wYear) { // after systemTime set at first second == 1
+  if (systemTime.wYear) { // after systemTime set at first second == 0
     unsigned short hms = systemTime.wHour << 12 | systemTime.wMinute << 6 | systemTime.wSecond;  // 4 + 6 + 6 rcvdBits
     short tMagPh[5] = {(short)hms, (short)(slice3.mag / 100), (short)(slice3.ph * 180 / PI), 
                                    (short)(slice4.mag / 100), (short)(slice4.ph * 180 / PI)};
@@ -303,7 +304,7 @@ void processBuffer(int b) {
 
   adjustPhase(phase, magOffset, phaseDifference); 
 
-  if (second == 12 && systemTime.wYear) // sync done
+  if (second == 12 && systemTime.wYear) // sync received
     setFrameType();
 
   avgPhaseOffset = normalize(avgPhaseOffset);
@@ -352,7 +353,6 @@ void startAudioIn() {
 
 int main() {
 
-
 #ifdef START_AT_HOUR // PDT: delayed clean night higher SNR start
   const int SecsPerHour = 60 * 60;
   const int SecsPerDay = 24 * 60 * 60;
@@ -385,4 +385,3 @@ int main() {
 
   return 0;
 }
-

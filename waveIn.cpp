@@ -144,7 +144,7 @@ void setupAudioIn(const char* deviceName, void (*waveInRdy)(int b, int samplesRe
   waveInReady();
 }
 
-#define POWER_REQ 
+#define POWER_REQ  // No help - still glitches
 HANDLE hPCR;
 
 void startWaveIn() {
