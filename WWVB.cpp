@@ -116,7 +116,7 @@ DWORD64 reverse(DWORD64 x) {
     return x;
 }
 
-void setExtendedLFSR(int hour, int minute, int DST = 1) {
+void setExtendedLFSR(int hourUTC, int minute, int DST = 1) {
   frameType = 'x';
 
   const DWORD64 Seq1Bits[2] = { // better __uint128_t
@@ -125,27 +125,26 @@ void setExtendedLFSR(int hour, int minute, int DST = 1) {
   }; // 127 bits
   // ShiftLeft128()
 
-  const signed char Seq1[127 + 96] = { // LFSR x^7 + x^6 + x^5 + x^2 + 1
+  const signed char Seq1[127 + 60 - 1] = { // LFSR x^7 + x^6 + x^5 + x^2 + 1
     1,1,1,1,1,1,1,0,0,1,1,0,1,1,0,1,0,1,0,1,0,0,0,1,0,0,1,0,0,1,1,0,0,1,1,1,1,0,0,0,1,1,1,
     0,1,1,1,0,1,0,1,1,1,1,0,1,0,0,1,0,1,1,0,0,1,0,1,0,0,1,1,1,0,0,1,0,0,0,1,1,0,0,0,1,0,1,
     1,1,0,0,0,0,1,0,0,0,0,1,1,0,1,0,0,0,0,0,1,1,1,1,1,0,1,1,0,0,0,0,0,0,1,0,1,0,1,1,0,
 
     1,1,1,1,1,1,1,0,0,1,1,0,1,1,0,1,0,1,0,1,0,0,0,1,0,0,1,0,0,1,1,0,0,1,1,1,1,0,0,0,1,1,1,
-    0,1,1,1,0,1,0,1,1,1,1,0,1,0,0,1,0,1,1,0,0,1,0,1,0,0,1,1,1,0,0,1,0,0,0,1,1,0,0,0,1,0,1,
-    1,1,0,0,0,0,1,0,0,0
+    0,1,1,1,0,1,0,1,1,1,1,0,1,0,0,1,
   };
 
-  int leftShifts = hour * 4 + minute / 16 + DST; // 127 bit circular shifts   max 96
+  int leftShifts = hourUTC * 4 + minute / 16 + DST; // 127 bit circular shifts   max 96
 
   switch (minute % 30) {
-    case 10 : memcpy(frameBits, Seq1 +  leftShifts,              60); break;
-    case 11 : memcpy(frameBits, Seq1 + (leftShifts + 60)  % 127, 60); break;
+    case 10 : memcpy(frameBits, Seq1 +  leftShifts,             60); break;
+    case 11 : memcpy(frameBits, Seq1 + (leftShifts + 60) % 127, 60); break;
     case 12 : 
       set106bitTimingWord(minute % 30);
       memcpy(frameBits, Seq1 + (leftShifts + 120) % 127,  7);       
       break;
 
-    // exteneded bits are reverse ordered in minutes 13..15, 43..45
+    // extended bits are reverse ordered in minutes 13..15, 43..45
     case 13: 
       set106bitTimingWord(minute % 30);
       for (int p =  7; p--;) frameBits[60 - 1 - p] = Seq1[(p + leftShifts + 120) % 127]; 
@@ -217,7 +216,7 @@ void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
   int bit = phaseInverted ? 1 : 0; 
 
   int syncBit = frameBits[second];
-  if ((frameType == 't' || frameType == 'f') && syncBit >= 0 && bit != syncBit) // check known bits
+  if (frameType != 'm' && syncBit >= 0 && bit != syncBit) // check known bits
     printfLog("%c", bit ? 'o' : '!'); // miscompare
   else printfLog("%d", bit);
 
@@ -236,19 +235,8 @@ int bitCount(unsigned long long rcvdBits) {
 
 static SYSTEMTIME systemTime;
 
-void setFrameType() {
-  if (frameType == 'x') {
-    printfLog("__x");
-    return;
-  }
-
-  if (frameType == 'f' && systemTime.wMinute % 30 == 12) {
-    printfLog("__f");
-    return;  
-  }
-
+void checkFrameType() {
   int syncBitsMatched;
-
   if (frameType == 'f') { // minute 13 or 43 -- fixed bits
     syncBitsMatched = 11 - 2 * bitCount(rcvdBits ^ 0b01010000011);
   } else if (frameType == 'x') { // works also for fixed
@@ -308,10 +296,12 @@ void processBuffer(int b) {
     frameType = 's'; // sync until known
 
     GetSystemTime(&systemTime);
+    printfLog("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
     if (lastCallbackMillisec >= 0 && abs((systemTime.wMilliseconds - lastCallbackMillisec + 500) % 1000 - 500) > 25) { // audio gap -- resync by difference
       bufferStartSeconds += (systemTime.wMilliseconds - lastCallbackMillisec + 1000) % 1000;
       printf("\n");
       if (systemTime.wSecond > second + 1) { // multi-second audio gap
+        printf("j");
         needResynch = true;
         return;
       }
@@ -320,7 +310,6 @@ void processBuffer(int b) {
       // will change by up to +/- 0.5 sample * 60 seconds / 192000 = 0.16 ms / minute = +/- 2.6ppm
       // plus system clock off by ?? ppm
       // --> need circular audio buffer or variable BufferSamples to keep centered
-    printfLog("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
 
     long long sumSquares = 0;
     for (int s = 0; s < BufferSamples; ++s)
@@ -351,6 +340,7 @@ void processBuffer(int b) {
     if (slice4EndSample >= BufferSamples * 17 / 16) { // off end by 1/4 of 1/4 buffer slice = 62.5 ms + 250 ms / 0.156ms = (as often as every 33 minutes)
       // TODO: better circular audio buffer feeding slices when ready
       needResynch = true;
+      printf("S");
       return;
     }
     slice4EndSample = BufferSamples;
@@ -385,8 +375,8 @@ void processBuffer(int b) {
 
   adjustPhase(phase, magOffset, phaseDifference); 
 
-  if (second == 12 && systemTime.wYear) // sync received
-    setFrameType();
+  if (second == 12 && systemTime.wYear) // sync bits received
+    checkFrameType();
 
   avgPhaseOffset = normalize(avgPhaseOffset);
 }

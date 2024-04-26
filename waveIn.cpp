@@ -156,7 +156,8 @@ void startWaveIn() {
   reason.Reason.SimpleReasonString = reason_string; 
   HANDLE hPCR = PowerCreateRequest(&reason);
   if (!PowerSetRequest(hPCR, PowerRequestExecutionRequired)) printf("PSR error %d\n", GetLastError());
-  // if (!PowerSetRequest(hPCR, PowerRequestSystemRequired)) printf("PSR error %d\n", GetLastError()); // already done by Realtek driver
+  if (!PowerSetRequest(hPCR, PowerRequestDisplayRequired)) printf("PSR error %d\n", GetLastError());
+  if (!PowerSetRequest(hPCR, PowerRequestSystemRequired)) printf("PSR error %d\n", GetLastError()); // already done by Realtek driver
 #endif
 
  // SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED); // don't sleep, run in background
@@ -167,8 +168,9 @@ void startWaveIn() {
 void stopWaveIn() {
   waveInStop(hwi);
 #ifdef POWER_REQ
-  // PowerClearRequest(hPCR, PowerRequestSystemRequired);
   PowerClearRequest(hPCR, PowerRequestExecutionRequired);
+  PowerClearRequest(hPCR, PowerRequestDisplayRequired);
+  PowerClearRequest(hPCR, PowerRequestSystemRequired);
   CloseHandle(hPCR);
 #endif
   // SetThreadExecutionState(ES_CONTINUOUS);
