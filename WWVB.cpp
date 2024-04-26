@@ -41,19 +41,16 @@ const int MaxOffsetAvgCount = 60 - 6 - 1; // decaying average over reporting min
 
 const int WWVBHz = 60000;
 
-char frameType = '_'; // sync, time, extended, fixed, message
-signed char frameBits[60] = { // -1: 0,  1: 1,  0: not checked
-// 0, 1,-1, 1,-1,-1,-1, 1, 1, 0, -1, 1,-1,  // Message frame sync
-   0,-1, 1, 1, 1,-1, 1, 1,-1, 0, -1,-1,-1, 0, 0, 0, 0, 0, 0, 0, // Time frame sync
-  -1, 1, 1,-1,-1,-1,-1, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // minutes: filled in by setMinutesInCentury()
-   0, 0, 0, 0, 0, 0, 0,-1,-1, 0, -1, 1, 1,-1, 1, 1,-1, 1, 1, 0,
-}; 
+char frameType = 't'; // sync, time, extended, fixed, message
+signed char frameBits[60];
 
-// 0 011 1011 0m000 time sync
-// 1 101 0001 1m010 message sync 
-
+// 001110110m000 time sync
+// 110100011m010 message sync 
 
 void setMinutesInCentury() {
+  const signed char timeSync[] = { -1, 0, 1, 1, 1, 0, 1, 1, 0, -1, 0, 0, 0};
+  memcpy(frameBits, timeSync, sizeof timeSync);  // could also be message
+
   /*
   time_par[0] = sum(modulo 2){time[       23,   21, 20,       17,16, 15,14,13,           9, 8,     6, 5, 4,     2,   0]}
   time_par[1] = sum(modulo 2){time[   24,    22,21,        18,17,16, 15,14,          10, 9,     7, 6, 5,     3,    1  ]}
@@ -85,10 +82,8 @@ void setMinutesInCentury() {
   memcpy(frameBits + 47, dst, sizeof dst);
 }
 
-void set106bitTimingWord(int minuteMod30) {
-  // six minutes = 360 bits =     127 + 106 + 127
-  const signed char FixedTimingWord[7 + 106 + 7] = {
-   -1,-1,-1,-1,-1,-1,-1,
+void setFixedBits(bool minuteX2) {
+  const signed char FixedTimingWord[6 * 60 - 2 * 127] = {
     1, 1, 0, 1, 0, 0, 0, 1, 1, 1,
     0, 1, 0, 1, 1, 0, 0, 1, 0, 1,
     1, 0, 0, 1, 1, 0, 1, 1, 1, 0,
@@ -100,9 +95,9 @@ void set106bitTimingWord(int minuteMod30) {
     1, 1, 0, 1, 1, 1, 1, 1, 1, 1,
     1, 0, 0, 0, 0, 0, 0, 1, 0, 0,
     1, 0, 0, 1, 0, 0,
-   -1,-1,-1,-1,-1,-1,-1,
   };
-  memcpy(frameBits, FixedTimingWord + (minuteMod30 == 13 ? 60 : 0), sizeof frameBits);
+  const int FixedBitsInMinute = sizeof(FixedTimingWord) / 2;
+  memcpy(frameBits + (minuteX2 ? 60 - FixedBitsInMinute : 0), FixedTimingWord + (minuteX2 ? 0 : FixedBitsInMinute), FixedBitsInMinute);
   frameType = 'f';
 }
 
@@ -116,7 +111,7 @@ DWORD64 reverse(DWORD64 x) {
     return x;
 }
 
-void setExtendedLFSR(int hourUTC, int minute, int DST = 1) {
+void setExtendedBits(int hourUTC, int minute, int DST = 1) {
   frameType = 'x';
 
   const DWORD64 Seq1Bits[2] = { // better __uint128_t
@@ -140,14 +135,14 @@ void setExtendedLFSR(int hourUTC, int minute, int DST = 1) {
     case 10 : memcpy(frameBits, Seq1 +  leftShifts,             60); break;
     case 11 : memcpy(frameBits, Seq1 + (leftShifts + 60) % 127, 60); break;
     case 12 : 
-      set106bitTimingWord(minute % 30);
+      setFixedBits(true);
       memcpy(frameBits, Seq1 + (leftShifts + 120) % 127,  7);       
       break;
 
     // extended bits are reverse ordered in minutes 13..15, 43..45
     case 13: 
-      set106bitTimingWord(minute % 30);
-      for (int p =  7; p--;) frameBits[60 - 1 - p] = Seq1[(p + leftShifts + 120) % 127]; 
+      setFixedBits(false);
+      for (int p = 7; p--;) frameBits[60 - 1 - p] = Seq1[(p + leftShifts + 120) % 127]; 
       break;
     case 14: for (int p = 60; p--;) frameBits[60 - 1 - p] = Seq1[(p + leftShifts +  60) % 127]; break;
     case 15: for (int p = 60; p--;) frameBits[60 - 1 - p] = Seq1[ p + leftShifts             ]; break;
@@ -224,11 +219,11 @@ void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
   rcvdBits |= bit;
 }
 
-int bitCount(unsigned long long rcvdBits) { 
+int bitCount(unsigned long long bits) { 
   int count = 0;
-  while (rcvdBits) {
-    count += ((rcvdBits & 3) + 1) / 2;
-    rcvdBits >>= 2;
+  while (bits) {
+    count += ((bits & 3) + 1) / 2;
+    bits >>= 2;
   }
   return count;
 }
@@ -237,9 +232,7 @@ static SYSTEMTIME systemTime;
 
 void checkFrameType() {
   int syncBitsMatched;
-  if (frameType == 'f') { // minute 13 or 43 -- fixed bits
-    syncBitsMatched = 11 - 2 * bitCount(rcvdBits ^ 0b01010000011);
-  } else if (frameType == 'x') { // works also for fixed
+  if (frameType == 'x' || frameType == 'f') {
     int firstBits = 0;
     for (int b = 1; b <= 12; ++b) {
       if (b == 9) continue; // marker
@@ -279,6 +272,13 @@ MagPhase processSlice(int startSample, int endSample, short* buf) {
   return MagPhase {sqrt(pow(i, 2) + pow(q, 2)) / 48, atan2(i, q)}; // -PI..PI
 }
 
+void setExpectedBits() {
+  GetSystemTime(&systemTime);
+  if ((systemTime.wMinute % 30 + 2) / 6 == 2)
+    setExtendedBits(systemTime.wHour, systemTime.wMinute);
+  else setMinutesInCentury(); 
+}
+
 double bufferStartSeconds;
 
 FILE* fMagPh;
@@ -293,9 +293,8 @@ void processBuffer(int b) {
     printfLog("\n");
 
     rcvdBits = 0;
-    frameType = 's'; // sync until known
+    setExpectedBits();
 
-    GetSystemTime(&systemTime);
     printfLog("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
     if (lastCallbackMillisec >= 0 && abs((systemTime.wMilliseconds - lastCallbackMillisec + 500) % 1000 - 500) > 25) { // audio gap -- resync by difference
       bufferStartSeconds += (systemTime.wMilliseconds - lastCallbackMillisec + 1000) % 1000;
@@ -316,13 +315,6 @@ void processBuffer(int b) {
       sumSquares += wavInBuf[b][s] * wavInBuf[b][s];
     printfLog("%3.0fdB ", 20 * log10(avgMag) - 10 * log10((double)sumSquares)); // SNR
     printfLog("%+4.0fms %+5.1f ", avgMagOfs * 500, avgPhaseDifference * 180 / PI);  // both s/b near 0
-
-    int minuteMod30 = systemTime.wMinute % 30;
-    if (minuteMod30 == 12 || minuteMod30 == 13)
-      set106bitTimingWord(minuteMod30);
-    else if (minuteMod30 >= 10 && minuteMod30 <= 15)
-      setExtendedLFSR(systemTime.wHour, systemTime.wMinute);
-    else setMinutesInCentury();
   }
 
   if (second % 60 == 0 || second % 10 == 9) { // marker second -- low signal
@@ -428,6 +420,7 @@ void startAudioIn() {
   clockOffSeconds = fmod(stNtp - fmod(ntp, 60) + 60 + 30,  60) - 30;  // -: CPU behind
   printf("%.3fs   (PC clock off %+.3fs)", bufferStartSeconds, clockOffSeconds); 
   alignOutput();
+  setExpectedBits();
 }
 
 int main() {
