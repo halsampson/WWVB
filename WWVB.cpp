@@ -15,12 +15,13 @@
 
 // #define START_AT_HOUR 1 
 
-// TODO: resync rough ms offset after recorded audio gaps: seen in magnitude offset ms reports *****
+// better resync rough ms offset after recorded audio gaps: seen in magnitude offset ms reports
 //   or Windows fix audio glitches
 //   or port to Linux or MCU
 // 
 // TODO: auto-sync start of seconds, minutes: initial sync words search
 //   see AM decoding at https://github.com/jepler/cwwvb
+//   phase inversions happen at low power so poor way to set bit timing
 
 // TODO: auto-adjust SamplingOffset_ms and SampleHz based on WWVB amplitude and phase offsets
 
@@ -36,10 +37,7 @@ const int  MaxNoiseAvgCount = 8;
 const int SamplingOffset_ms = -1000/4 + 170; // to center sample buffer on 2nd half of bit time (want slice3StartSample ~ BufferSamples / 4)
 const int MaxOffsetAvgCount = 60 - 6 - 1; // decaying average over reporting minute
 
-// TODO: decode Six Minute frames for 15dB better time signal
-//   106 bit compare
-
-// TODO: Try I Q (I V ?) separation into more common 48kHz stereo sampling (although many mic inputs are mono)
+// TODO: Try I Q (I V ?) separation into more common 48kHz stereo sampling (Note many mic inputs are mono, so amplify for line inputs)
 
 const int WWVBHz = 60000;
 
@@ -53,6 +51,7 @@ signed char frameBits[60] = { // -1: 0,  1: 1,  0: not checked
 
 // 0 011 1011 0m000 time sync
 // 1 101 0001 1m010 message sync 
+
 
 void setMinutesInCentury() {
   /*
@@ -105,6 +104,55 @@ void set106bitTimingWord(int minuteMod30) {
   };
   memcpy(frameBits, FixedTimingWord + (minuteMod30 == 13 ? 60 : 0), sizeof frameBits);
   frameType = 'f';
+}
+
+DWORD64 reverse(DWORD64 x) {
+    x = ((x >> 1)  & 0x5555555555555555) | ((x & 0x5555555555555555) << 1); // swap odd and even bits
+    x = ((x >> 2)  & 0x3333333333333333) | ((x & 0x3333333333333333) << 2); // swap pairs
+    x = ((x >> 4)  & 0x0f0f0f0f0f0f0f0f) | ((x & 0x0f0f0f0f0f0f0f0f) << 4); // swap nibbles
+    x = ((x >> 8)  & 0x00ff00ff00ff00ff) | ((x & 0x00ff00ff00ff00ff) << 8); // swap bytes
+    x = ((x >> 16) & 0x0000ffff0000ffff) | ((x & 0x0000ffff0000ffff) << 16); // swap words
+    x = ((x >> 32) & 0x00000000ffffffff) | ((x & 0x00000000ffffffff) << 32); // swap dwords
+    return x;
+}
+
+void setExtendedLFSR(int hour, int minute, int DST = 1) {
+  frameType = 'x';
+
+  const DWORD64 Seq1Bits[2] = { // better __uint128_t
+    0b1111111001101101010100010010011001111000111011101011110100101100,
+    0b101001110010001100010111000010000110100000111110110000001010110
+  }; // 127 bits
+  // ShiftLeft128()
+
+  const signed char Seq1[127 + 96] = { // LFSR x^7 + x^6 + x^5 + x^2 + 1
+    1,1,1,1,1,1,1,0,0,1,1,0,1,1,0,1,0,1,0,1,0,0,0,1,0,0,1,0,0,1,1,0,0,1,1,1,1,0,0,0,1,1,1,
+    0,1,1,1,0,1,0,1,1,1,1,0,1,0,0,1,0,1,1,0,0,1,0,1,0,0,1,1,1,0,0,1,0,0,0,1,1,0,0,0,1,0,1,
+    1,1,0,0,0,0,1,0,0,0,0,1,1,0,1,0,0,0,0,0,1,1,1,1,1,0,1,1,0,0,0,0,0,0,1,0,1,0,1,1,0,
+
+    1,1,1,1,1,1,1,0,0,1,1,0,1,1,0,1,0,1,0,1,0,0,0,1,0,0,1,0,0,1,1,0,0,1,1,1,1,0,0,0,1,1,1,
+    0,1,1,1,0,1,0,1,1,1,1,0,1,0,0,1,0,1,1,0,0,1,0,1,0,0,1,1,1,0,0,1,0,0,0,1,1,0,0,0,1,0,1,
+    1,1,0,0,0,0,1,0,0,0
+  };
+
+  int leftShifts = hour * 4 + minute / 16 + DST; // 127 bit circular shifts   max 96
+
+  switch (minute % 30) {
+    case 10 : memcpy(frameBits, Seq1 +  leftShifts,              60); break;
+    case 11 : memcpy(frameBits, Seq1 + (leftShifts + 60)  % 127, 60); break;
+    case 12 : 
+      set106bitTimingWord(minute % 30);
+      memcpy(frameBits, Seq1 + (leftShifts + 120) % 127,  7);       
+      break;
+
+    // exteneded bits are reverse ordered in minutes 13..15, 43..45
+    case 13: 
+      set106bitTimingWord(minute % 30);
+      for (int p =  7; p--;) frameBits[60 - 1 - p] = Seq1[(p + leftShifts + 120) % 127]; 
+      break;
+    case 14: for (int p = 60; p--;) frameBits[60 - 1 - p] = Seq1[(p + leftShifts +  60) % 127]; break;
+    case 15: for (int p = 60; p--;) frameBits[60 - 1 - p] = Seq1[ p + leftShifts             ]; break;
+  }
 }
 
 const double PI = 3.141592653589793238463;
@@ -203,6 +251,14 @@ void setFrameType() {
 
   if (frameType == 'f') { // minute 13 or 43 -- fixed bits
     syncBitsMatched = 11 - 2 * bitCount(rcvdBits ^ 0b01010000011);
+  } else if (frameType == 'x') { // works also for fixed
+    int firstBits = 0;
+    for (int b = 1; b <= 12; ++b) {
+      if (b == 9) continue; // marker
+      firstBits <<= 1;
+      firstBits |= frameBits[b];
+    }
+    syncBitsMatched = 11 - 2 * bitCount(rcvdBits ^ firstBits);
   } else { // can be time or message
     const int TimeSync = 0b01110110000; // 01110110m000 time sync,    inverted: 10001001m111  
     const int MsgSync  = 0b10100011010; // 10100011m010 message sync, inverted: 01011100m101
@@ -239,8 +295,11 @@ double bufferStartSeconds;
 
 FILE* fMagPh;
 
+bool needResynch;
+int lastCallbackMillisec;
+
 void processBuffer(int b) {
-  static double avgMag, avgMagOfs, avgPhaseDifference;
+  static double avgMag = 100, avgMagOfs, avgPhaseDifference;
 
   if (second == 0) {
     printfLog("\n");
@@ -249,6 +308,18 @@ void processBuffer(int b) {
     frameType = 's'; // sync until known
 
     GetSystemTime(&systemTime);
+    if (lastCallbackMillisec >= 0 && abs((systemTime.wMilliseconds - lastCallbackMillisec + 500) % 1000 - 500) > 25) { // audio gap -- resync by difference
+      bufferStartSeconds += (systemTime.wMilliseconds - lastCallbackMillisec + 1000) % 1000;
+      printf("\n");
+      if (systemTime.wSecond > second + 1) { // multi-second audio gap
+        needResynch = true;
+        return;
+      }
+    }
+    lastCallbackMillisec = systemTime.wMilliseconds;  
+      // will change by up to +/- 0.5 sample * 60 seconds / 192000 = 0.16 ms / minute = +/- 2.6ppm
+      // plus system clock off by ?? ppm
+      // --> need circular audio buffer or variable BufferSamples to keep centered
     printfLog("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
 
     long long sumSquares = 0;
@@ -261,7 +332,7 @@ void processBuffer(int b) {
     if (minuteMod30 == 12 || minuteMod30 == 13)
       set106bitTimingWord(minuteMod30);
     else if (minuteMod30 >= 10 && minuteMod30 <= 15)
-      frameType = 'x';
+      setExtendedLFSR(systemTime.wHour, systemTime.wMinute);
     else setMinutesInCentury();
   }
 
@@ -273,10 +344,20 @@ void processBuffer(int b) {
 
   // process last half of bit time where amplitude is always high
   int slice3StartSample = (int)round(fmod((bufferStartSeconds + 0.5) * SampleHz, BufferSamples));  // ~ BufferSamples / 4
-  int slice3EndSample = slice3StartSample + BufferSamples / 4; 
+  int slice3EndSample = slice3StartSample + BufferSamples / 4;
+  int slice4EndSample = slice3EndSample + BufferSamples / 4;
+
+  if (slice4EndSample > BufferSamples) {
+    if (slice4EndSample >= BufferSamples * 17 / 16) { // off end by 1/4 of 1/4 buffer slice = 62.5 ms + 250 ms / 0.156ms = (as often as every 33 minutes)
+      // TODO: better circular audio buffer feeding slices when ready
+      needResynch = true;
+      return;
+    }
+    slice4EndSample = BufferSamples;
+  }
 
   MagPhase slice3 = processSlice(slice3StartSample, slice3EndSample, wavInBuf[b]); // bit start + 0.5..0.75s
-  MagPhase slice4 = processSlice(slice3EndSample, min(slice3EndSample + BufferSamples / 4, BufferSamples), wavInBuf[b]);  // bit start + 0.75..1.0s 
+  MagPhase slice4 = processSlice(slice3EndSample, slice4EndSample, wavInBuf[b]);  // bit start + 0.75..1.0s 
 
   static int offsetAvgCount = 1;
   double magOffset = (slice4.mag - slice3.mag) / (slice3.mag + slice4.mag); // 0 if no noise, centered on slices
@@ -320,32 +401,40 @@ void audioReadyCallback(int b, int samplesRecorded) {
   }
   bufferStartSeconds += samplesRecorded / SampleHz; // next buffer start time
   // TODO: samples might be discontinuous -- check for sudden jump in avgMagOffset and resync
+  // TODO: treat audio buffes a circular and/or adjust BufferSmaples to stay centered
 }
-
-double clockOffSeconds;
 
 void alignOutput() {
   printf("\n UTC");
   for (int i= 0; i < 32 + int(bufferStartSeconds) % 60; ++i) printf(" ");
 }
 
-void startAudioIn() {
-  extern double ntpTime();
-  double ntp = ntpTime();
-  SYSTEMTIME nearNTP_time; GetSystemTime(&nearNTP_time);
+// #define USE_NTP
 
-  int ms = (int)(fmod(ntp, 1) * 1000);
+void startAudioIn() {
+  double clockOffSeconds = 0.030; // check with https://nist.time.gov/  Your clock is off by:
+  double ntp = 0;
+
+#ifdef USE_NTP // TODO: once, then use system time and clockOffSeconds
+  extern double ntpTime();
+  ntp = ntpTime(); 
+#endif
+
+  SYSTEMTIME nearNTP_time; GetSystemTime(&nearNTP_time);
+  double stNtp = nearNTP_time.wSecond + nearNTP_time.wMilliseconds / 1000.;
+  if (ntp == 0) // use system time
+    ntp = stNtp - clockOffSeconds;
+
+  int ms = (int)(fmod(ntp + 1, 1) * 1000);
   int sleep_ms = 2000 - ms + SamplingOffset_ms;
   Sleep(sleep_ms);   // start near 1 second boundary
 
-  startWaveIn();  // for consistent phase
+  startWaveIn();  // consistent phase
   SYSTEMTIME wavInStartTime; GetSystemTime(&wavInStartTime);
-
-  double stNtp = nearNTP_time.wSecond + nearNTP_time.wMilliseconds / 1000.;
   double stWis = wavInStartTime.wSecond + wavInStartTime.wMilliseconds / 1000.;
-  bufferStartSeconds = fmod(ntp + stWis - stNtp, 60); // approx recording start time
 
-  // check also with https://nist.time.gov/  Your clock is off by: 
+  lastCallbackMillisec = -1;
+  bufferStartSeconds = fmod(ntp + stWis - stNtp, 60); // approx recording start time
   clockOffSeconds = fmod(stNtp - fmod(ntp, 60) + 60 + 30,  60) - 30;  // -: CPU behind
   printf("%.3fs   (PC clock off %+.3fs)", bufferStartSeconds, clockOffSeconds); 
   alignOutput();
@@ -363,10 +452,11 @@ int main() {
   fMagPh = _fsopen("magPhs.bin", "wb", _SH_DENYNO); 
 
   setupAudioIn(AudDeviceName, &audioReadyCallback);
+
   startAudioIn();
   
   while (1) {
-    switch(_getch()) {
+    if (_kbhit()) switch (_getch()) {
       case 'f' : if (1 || cleanPhaseOffsetCount > 1000) {
         double avgPhaseOffsetPerSec = cleanPhaseOffsetTotal / cleanPhaseOffsetCount;
         double avgCyclesPerSecOffset = avgPhaseOffsetPerSec / TwoPI;   // cycles of WWVBHz per second
@@ -381,6 +471,15 @@ int main() {
         stopWaveIn();
         exit(0);
     }
+
+    if (needResynch) {
+      needResynch = false;
+      stopWaveIn();
+      startAudioIn();
+    #ifdef USE_NTP
+      Sleep(5 * 60 * 1000);  // prevent possible NTP DoS
+    #endif
+    } else Sleep(500);
   }
 
   return 0;
