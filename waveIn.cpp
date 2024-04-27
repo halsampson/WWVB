@@ -144,7 +144,7 @@ void setupAudioIn(const char* deviceName, void (*waveInRdy)(int b, int samplesRe
   waveInReady();
 }
 
-#define POWER_REQ  // No help - still glitches
+#define POWER_REQ
 HANDLE hPCR;
 
 void startWaveIn() {
@@ -156,7 +156,7 @@ void startWaveIn() {
   reason.Reason.SimpleReasonString = reason_string; 
   HANDLE hPCR = PowerCreateRequest(&reason);
   if (!PowerSetRequest(hPCR, PowerRequestExecutionRequired)) printf("PSR error %d\n", GetLastError());
-  if (!PowerSetRequest(hPCR, PowerRequestDisplayRequired)) printf("PSR error %d\n", GetLastError());
+  if (!PowerSetRequest(hPCR, PowerRequestDisplayRequired)) printf("PSR error %d\n", GetLastError()); // prevents audio gaps OK
   if (!PowerSetRequest(hPCR, PowerRequestSystemRequired)) printf("PSR error %d\n", GetLastError()); // already done by Realtek driver
 #endif
 
