@@ -14,14 +14,11 @@
 #define AudDeviceName "Realtek High Def" 
 
 // #define START_AT_HOUR 1 
+double clockOffSeconds = 0.034; // check with https://nist.time.gov/  Your clock is off by:
 
-// better resync rough ms offset after recorded audio gaps: seen in magnitude offset ms reports
-//   or Windows fix audio glitches
-//   or port to Linux or MCU
-// 
 // TODO: auto-sync start of seconds, minutes: initial sync words search
 //   see AM decoding at https://github.com/jepler/cwwvb
-//   phase inversions happen at low power so poor way to set bit timing
+//   PCM phase inversions happen at low power so poor way to set bit timing
 
 // TODO: auto-adjust SamplingOffset_ms and SampleHz based on WWVB amplitude and phase offsets
 
@@ -48,6 +45,7 @@ signed char frameBits[60];
 // 110100011m010 message sync 
 
 void setMinutesInCentury() {
+  frameType = 't';
   const signed char timeSync[] = { -1, 0, 1, 1, 1, 0, 1, 1, 0, -1, 0, 0, 0};
   memcpy(frameBits, timeSync, sizeof timeSync);  // could also be message
 
@@ -83,6 +81,7 @@ void setMinutesInCentury() {
 }
 
 void setFixedBits(bool minuteX2) {
+  frameType = 'f';
   const signed char FixedTimingWord[6 * 60 - 2 * 127] = {
     1, 1, 0, 1, 0, 0, 0, 1, 1, 1,
     0, 1, 0, 1, 1, 0, 0, 1, 0, 1,
@@ -98,7 +97,6 @@ void setFixedBits(bool minuteX2) {
   };
   const int FixedBitsInMinute = sizeof(FixedTimingWord) / 2;
   memcpy(frameBits + (minuteX2 ? 60 - FixedBitsInMinute : 0), FixedTimingWord + (minuteX2 ? 0 : FixedBitsInMinute), FixedBitsInMinute);
-  frameType = 'f';
 }
 
 DWORD64 reverse(DWORD64 x) {
@@ -296,10 +294,10 @@ void processBuffer(int b) {
     setExpectedBits();
 
     printfLog("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
-    if (lastCallbackMillisec >= 0 && abs((systemTime.wMilliseconds - lastCallbackMillisec + 500) % 1000 - 500) > 25) { // audio gap -- resync by difference
-      bufferStartSeconds += (systemTime.wMilliseconds - lastCallbackMillisec + 1000) % 1000;
+    if (lastCallbackMillisec >= 0 && abs((systemTime.wMilliseconds - lastCallbackMillisec + 1000 + 500) % 1000 - 500) > 25) { // audio gap -- resync by difference
+      bufferStartSeconds += ((systemTime.wMilliseconds - lastCallbackMillisec + 1000) % 1000) / 1000.;
       printf("\n");
-      if (systemTime.wSecond > second + 1) { // multi-second audio gap
+      if (systemTime.wSecond > second + 2) { // multi-second audio gap
         printf("j");
         needResynch = true;
         return;
@@ -394,7 +392,6 @@ void alignOutput() {
 // #define USE_NTP
 
 void startAudioIn() {
-  double clockOffSeconds = 0.030; // check with https://nist.time.gov/  Your clock is off by:
   double ntp = 0;
 
 #ifdef USE_NTP // TODO: once, then use system time and clockOffSeconds
