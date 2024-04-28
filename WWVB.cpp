@@ -14,7 +14,10 @@
 #define AudDeviceName "Realtek High Def" 
 
 // #define START_AT_HOUR 1 
-double clockOffSeconds = 0.034; // check with https://nist.time.gov/  Your clock is off by:
+double clockOffSeconds = 0.034; // check with https://nist.time.gov/  "Your clock is off by: ____"  or USE_NTP
+// #define USE_NTP
+
+// TODO: Use 3 one second buffers, circular, wait so slice crossing buffer boundary is ready
 
 // TODO: auto-sync start of seconds, minutes: initial sync words search
 //   see AM decoding at https://github.com/jepler/cwwvb
@@ -154,7 +157,7 @@ double normalize(double phase) {
   return fmod(phase + TwoPI + PI, TwoPI) - PI; // -PI..PI
 }
 
-unsigned long long rcvdBits;
+DWORD64 rcvdBits; // one minute: 60 - 7 non-marker bits
 
 int second;
 double avgPhaseOffset, lastCorrection;
@@ -179,6 +182,8 @@ void printfLog(const char* format, ...) {
     // fflush(fLog);
   }
 }
+
+int errCount;
 
 void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
   // reduce phase servo gain when 0.25s slices amplitudes and/or phases don't match:
@@ -209,15 +214,16 @@ void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
   int bit = phaseInverted ? 1 : 0; 
 
   int syncBit = frameBits[second];
-  if (frameType != 'm' && syncBit >= 0 && bit != syncBit) // check known bits
+  if (frameType != 'm' && syncBit >= 0 && bit != syncBit) { // check known bits
     printfLog("%c", bit ? 'o' : '!'); // miscompare
-  else printfLog("%d", bit);
+    ++errCount;
+  } else printfLog("%d", bit);
 
   rcvdBits <<= 1;
   rcvdBits |= bit;
 }
 
-int bitCount(unsigned long long bits) { 
+int bitCount(DWORD64 bits) { 
   int count = 0;
   while (bits) {
     count += ((bits & 3) + 1) / 2;
@@ -238,7 +244,7 @@ void checkFrameType() {
       firstBits |= frameBits[b];
     }
     syncBitsMatched = 11 - 2 * bitCount(rcvdBits ^ firstBits);
-  } else { // can be time or message
+  } else { // could be time or message (unlikely)
     const int TimeSync = 0b01110110000; // 01110110m000 time sync,    inverted: 10001001m111  
     const int MsgSync  = 0b10100011010; // 10100011m010 message sync, inverted: 01011100m101
 
@@ -257,7 +263,7 @@ void checkFrameType() {
 }
 
 typedef struct {
-  double mag, ph;
+  double mag, ph; // magnitude, phase
 } MagPhase;
 
 MagPhase processSlice(int startSample, int endSample, short* buf) {
@@ -290,23 +296,25 @@ void processBuffer(int b) {
   if (second == 0) {
     printfLog("\n");
 
+    errCount = 0;
     rcvdBits = 0;
     setExpectedBits();
 
-    printfLog("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
     if (lastCallbackMillisec >= 0 && abs((systemTime.wMilliseconds - lastCallbackMillisec + 1000 + 500) % 1000 - 500) > 25) { // audio gap -- resync by difference
       bufferStartSeconds += ((systemTime.wMilliseconds - lastCallbackMillisec + 1000) % 1000) / 1000.;
-      printf("\n");
-      if (systemTime.wSecond > second + 2) { // multi-second audio gap
-        printf("j");
-        needResynch = true;
-        return;
-      }
+      printf("\n"); // gap
     }
     lastCallbackMillisec = systemTime.wMilliseconds;  
       // will change by up to +/- 0.5 sample * 60 seconds / 192000 = 0.16 ms / minute = +/- 2.6ppm
       // plus system clock off by ?? ppm
       // --> need circular audio buffer or variable BufferSamples to keep centered
+    printfLog("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
+
+    if (systemTime.wSecond > second + 2) { // multi-second audio gap
+       printf("j");
+       needResynch = true;
+       return;
+    }
 
     long long sumSquares = 0;
     for (int s = 0; s < BufferSamples; ++s)
@@ -318,6 +326,9 @@ void processBuffer(int b) {
   if (second % 60 == 0 || second % 10 == 9) { // marker second -- low signal
     printfLog("%c", frameType);  
     avgPhaseOffset += lastCorrection;
+
+    if (second == 59)
+      printfLog(" %d", errCount);
     return; // don't process low signal marker seconds
   }
 
@@ -385,11 +396,14 @@ void audioReadyCallback(int b, int samplesRecorded) {
 }
 
 void alignOutput() {
-  printf("\n UTC");
-  for (int i= 0; i < 32 + int(bufferStartSeconds) % 60; ++i) printf(" ");
+  printf("\n   UTC        SNR   Align  °off ");
+  int startSecond = int(bufferStartSeconds) % 60;
+  if (startSecond >= 9) {
+    printf("Received "); // 9 long
+    startSecond -= 9;
+  }
+  for (int i= 0; i < startSecond; ++i) printf(" ");
 }
-
-// #define USE_NTP
 
 void startAudioIn() {
   double ntp = 0;
@@ -437,13 +451,20 @@ int main() {
   
   while (1) {
     if (_kbhit()) switch (_getch()) {
-      case 'f' : if (1 || cleanPhaseOffsetCount > 1000) {
+      case 'f' : {
         double avgPhaseOffsetPerSec = cleanPhaseOffsetTotal / cleanPhaseOffsetCount;
         double avgCyclesPerSecOffset = avgPhaseOffsetPerSec / TwoPI;   // cycles of WWVBHz per second
-        printf("\nSampleHz off by: %+.4f Hz", avgCyclesPerSecOffset * SampleHz / WWVBHz);  // TODO: check calc by changing SampleHz ***
+        double SampleHzError = avgCyclesPerSecOffset * WWVBHz / SampleHz;
+        printf("\nSampleHz off by: %+.4f Hz, should be: %.6f", SampleHzError, SampleHz + SampleHzError);  // TODO: check calc by changing SampleHz ***
+           // full run average, so SampleHzError * 2 to compare with 1PPS change from last check
+
+        cleanPhaseOffsetTotal = cleanPhaseOffsetCount = 0;
         alignOutput();
         }
         break;
+
+      case 'r' : needResynch = true; break;
+
       case 's' : // stop
         printf("\nstop\n");
         if (fMagPh) fclose(fMagPh);

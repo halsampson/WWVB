@@ -12,20 +12,20 @@ const unsigned short MicLevel = 65535;
 #define WAV_IN_BUF_MSECS 1000
 #define WAV_IN_CHANNELS 1
 #define BITS_PER_SAMPLE 16
-#define WAV_IN_SAMPLE_HZ 192000  // requested 
+#define WAV_IN_SAMPLE_HZ 192000  // requested standard nominal value
 
-short wavInBuf[2][BufferSamples];
+short wavInBuf[NUM_WAV_BUFFERS][BufferSamples];
 
 void (*waveInRdyCallback)(int b, int samplesRecorded);
 
 HWAVEIN hwi;
-WAVEHDR wih[2]; 
+WAVEHDR wih[NUM_WAV_BUFFERS]; 
 
 int samplesRecorded;
 
 bool waveInReady() {
   bool waveInReady = false;
-   for (int b = 0; b < 2; ++b) {
+   for (int b = 0; b < NUM_WAV_BUFFERS; ++b) {
     if (wih[b].dwFlags & WHDR_DONE || !wih[b].dwFlags) {
       if (wih[b].dwFlags & WHDR_DONE) {  
         (*waveInRdyCallback)(b, samplesRecorded);
