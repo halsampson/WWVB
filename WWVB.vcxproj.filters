@@ -24,9 +24,21 @@
     <ClCompile Include="waveIn.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Brymen.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SSerial.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="waveIn.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Brymen.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SSerial.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

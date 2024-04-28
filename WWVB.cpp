@@ -10,6 +10,7 @@
 #include <corecrt_share.h>
 
 #include "waveIn.h"
+#include "Brymen.h"
 
 #define AudDeviceName "Realtek High Def" 
 
@@ -32,6 +33,8 @@ const int  MaxPhaseAvgCount = 8;  // TODO: adjust phase servo gain for best trac
   // optimum depends on phase noise and drift (ionosphere bounce height), accuracy of SampleHz, ...
   // Beware phase shift push/pull from ~60Hz odd harmonics as they drift through
   //   Squelch phase servo gain when ~60 Hz * N (999 or 1001) ~ 60 kHz
+
+// correlate errors with line Hz = WWVBHz / 1001 = 59.94 Hz or / 999 = 60.06 Hz
 
 const int SamplingOffset_ms = -1000/4 + 170; // to center sample buffer on 2nd half of bit time (want slice3StartSample ~ BufferSamples / 4)
 const int MaxOffsetAvgCount = 60 - 6 - 1; // decaying average over reporting minute
@@ -184,6 +187,12 @@ void printfLog(const char* format, ...) {
 
 int errCount;
 
+typedef struct {
+  double mag, ph; // magnitude, phase
+} MagPhase;
+
+double lineHzInterfere;
+
 void adjustPhase(double& phase, double magOffsetDifference, double phaseDifference) {
   // ?? better PID servo to handle short and long-term drifts vs. noise?
   double bitPhase = normalize(phase - avgPhaseOffset);  // should be near 0 or +/-PI
@@ -254,14 +263,11 @@ void checkFrameType() {
   printfLog("%+d%c", syncBitsMatched - syncBitsMatched / 4, frameType);  // scaled to single digit -9..9
 }
 
-typedef struct {
-  double mag, ph; // magnitude, phase
-} MagPhase;
 
-MagPhase processSlice(int startSample, int endSample, short* buf) {
+MagPhase processSlice(int startSample, int endSample, short* buf, double freq = WWVBHz) {
   double i = 0, q = 0;
   for (int s = startSample; s < endSample; ++s)  {  
-    double theta = TwoPI * WWVBHz / SampleHz;
+    double theta = TwoPI * freq / SampleHz;
     i += cos(s * theta) * buf[s];
     q += sin(s * theta) * buf[s];
   }
@@ -284,6 +290,7 @@ int lastCallbackMillisec;
 
 void processBuffer(int b) {
   static double avgMag = 100, avgMagOfs, avgPhaseDifference;
+  static long long sumSquares;
 
   if (second == 0) {
     printfLog("\n");
@@ -301,28 +308,41 @@ void processBuffer(int b) {
       // plus system clock off by ?? ppm
       // --> need circular audio buffer or variable BufferSamples to keep centered
     printfLog("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
+    printfLog("%+4.0fms ", avgMagOfs * 500); 
 
     if (systemTime.wSecond > second + 2) { // multi-second audio gap
        printf("j");
        needResynch = true;
        return;
     }
-
-    long long sumSquares = 0;
-    for (int s = 0; s < BufferSamples; ++s)
-      sumSquares += wavInBuf[b][s] * wavInBuf[b][s];
-    printfLog("%3.0fdB ", 20 * log10(avgMag) - 10 * log10((double)sumSquares)); // SNR
-    printfLog("%+4.0fms %+5.1f ", avgMagOfs * 500, avgPhaseDifference * 180 / PI);  // both s/b near 0
   }
+
+  if (second == 58)
+    requestReading();
 
   if (second % 60 == 0 || second % 10 == 9) { // marker second -- low signal
     printfLog("%c", frameType);  
     avgPhaseOffset += lastCorrection;
 
-    if (second == 59)
-      printfLog(" %d", errCount);
+    if (second == 59) {
+      printfLog(" %2d", errCount);
+      
+      printf("%3.0f", 10 * log10(lineHzInterfere) + 10); // Noise / Signal
+      lineHzInterfere = 0;
+      
+      printfLog("%3.0f", 10 * log10((double)sumSquares / (60 - 7)) - 20 * log10(avgMag)); // Noise / Signal
+      sumSquares = 0;
+
+      printfLog("%+5.1f", avgPhaseDifference * 180 / PI); // degrees
+
+      double lineHz = getReading();
+      printfLog("%+4.0f", lineHz * 1001 - WWVBHz); // bad interference at 0, ~ +/- N * 120
+    }
     return; // don't process low signal marker seconds
   }
+
+  for (int s = 0; s < BufferSamples; ++s)
+    sumSquares += wavInBuf[b][s] * wavInBuf[b][s];
 
   // process last half of bit time where amplitude is always high
   int slice3StartSample = (int)round(fmod((bufferStartSeconds + 0.5) * SampleHz, BufferSamples));  // ~ BufferSamples / 4
@@ -341,18 +361,29 @@ void processBuffer(int b) {
 
   MagPhase slice3 = processSlice(slice3StartSample, slice3EndSample, wavInBuf[b]); // bit start + 0.5..0.75s
   MagPhase slice4 = processSlice(slice3EndSample, slice4EndSample, wavInBuf[b]);  // bit start + 0.75..1.0s 
+  double totalMag = slice3.mag + slice4.mag; 
+ 
+  // overlap when lineHz * 1000 +/- odd N = WWVBHz;  lineHz = WWVBHz / 1001 = 59.94Hz
+  // measure next odd harmonic: lineHz * 1003 = WWVBHz * 1003 / 1001
+  lineHzInterfere = max(processSlice(0, BufferSamples, wavInBuf[b], 1003 * WWVBHz / 1001.).mag / totalMag, lineHzInterfere); 
+  // positive deviation harmonics almost same:  1001 / 999 ~ 1003 / 1001 within 4ppm
+
+  // also 120 Hz * 500 +/- odd N = WWVBHz lineHz = 59.88 Hz (rare - 2 sigma?)
+  // lineHzInterfere = max(processSlice(0, BufferSamples, wavInBuf[b], WWVBHz * 503 /  501.).mag / totalMag, lineHzInterfere);  // 120 Hz rarer
+
+  // TODO: more squelch when line Hz odd overtones coincide
 
   static int offsetAvgCount = 1;
-  double magOffset = (slice4.mag - slice3.mag) / (slice3.mag + slice4.mag); // 0 if no noise, centered on slices
+  double magOffset = (slice4.mag - slice3.mag) / totalMag; // 0 if no noise, centered on slices
   avgMagOfs += (magOffset - avgMagOfs) / offsetAvgCount;
   // TODO: servo avgMagOfs toward 0 vs. clock drift
 
-  avgMag += (slice3.mag + slice4.mag - avgMag) / offsetAvgCount;
+  avgMag += (totalMag - avgMag) / offsetAvgCount;
 
   // also show deviation = noise
 
   double phaseDifference = normalize(slice4.ph - slice3.ph); // 0 if no short-term phase noise/drift
-  avgPhaseDifference += (phaseDifference - avgPhaseDifference) / offsetAvgCount;
+  avgPhaseDifference += normalize(phaseDifference - avgPhaseDifference) / offsetAvgCount;
   avgPhaseDifference = normalize(avgPhaseDifference);
   if (offsetAvgCount < MaxOffsetAvgCount) ++ offsetAvgCount;
 
@@ -388,13 +419,14 @@ void audioReadyCallback(int b, int samplesRecorded) {
 }
 
 void alignOutput() {
-  printf("\n   UTC        SNR   Align  °off ");
-  int startSecond = int(bufferStartSeconds) % 60;
+  printf("\n   UTC        Align ");
+  // 3 seconds of buffers?
+  int startSecond = int(fmod(bufferStartSeconds + 3 + 0.5, 60));
   if (startSecond >= 9) {
     printf("Received "); // 9 long
     startSecond -= 9;
   }
-  for (int i= 0; i < startSecond; ++i) printf(" ");
+  for (int i = 0; i < startSecond; ++i) printf(" ");
 }
 
 void startAudioIn() {
@@ -421,12 +453,13 @@ void startAudioIn() {
   lastCallbackMillisec = -1;
   bufferStartSeconds = fmod(ntp + stWis - stNtp, 60); // approx recording start time
   clockOffSeconds = fmod(stNtp - fmod(ntp, 60) + 60 + 30,  60) - 30;  // -: CPU behind
-  printf("%.3fs   (PC clock off %+.3fs)", bufferStartSeconds, clockOffSeconds); 
+  printf("\n%.3fs   (PC clock off %+.3fs)", bufferStartSeconds, clockOffSeconds); 
   alignOutput();
   setExpectedBits();
 }
 
 int main() {
+  openBrymen();
 
 #ifdef START_AT_HOUR // PDT: delayed clean night higher SNR start
   const int SecsPerHour = 60 * 60;
@@ -462,6 +495,7 @@ int main() {
         if (fMagPh) fclose(fMagPh);
         if (fLog) fclose(fLog);
         stopWaveIn();
+        closeBrymen();
         exit(0);
     }
 
