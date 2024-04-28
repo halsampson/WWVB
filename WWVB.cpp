@@ -27,12 +27,11 @@ double clockOffSeconds = 0.034; // check with https://nist.time.gov/  "Your cloc
 
 // TODO: port to small MCU with precise 240 kHz ADC sampling so sin and cos values are only -1,0,+1
 
-const int  MaxPhaseAvgCount = 8;  // TODO: adjust phase servo gain for best tracking, lock in, and noise rejection
-   // gain is reduced by noise squelch
-   // optimum depends on phase noise and drift (ionosphere bounce height), accuracy of SampleHz, ...
-
-const bool AverageTimeFrames = false; // for noisy evening signal; problem: sometimes stuck in wrong phase inversion state due to noise
-const int  MaxNoiseAvgCount = 8;
+const int  MaxPhaseAvgCount = 8;  // TODO: adjust phase servo gain for best tracking, lock in, and noise rejection   
+  // gain is reduced by noise squelch
+  // optimum depends on phase noise and drift (ionosphere bounce height), accuracy of SampleHz, ...
+  // Beware phase shift push/pull from ~60Hz odd harmonics as they drift through
+  //   Squelch phase servo gain when ~60 Hz * N (999 or 1001) ~ 60 kHz
 
 const int SamplingOffset_ms = -1000/4 + 170; // to center sample buffer on 2nd half of bit time (want slice3StartSample ~ BufferSamples / 4)
 const int MaxOffsetAvgCount = 60 - 6 - 1; // decaying average over reporting minute
@@ -185,23 +184,16 @@ void printfLog(const char* format, ...) {
 
 int errCount;
 
-void adjustPhase(double& phase, double  magOffset, double phaseDifference) {
-  // reduce phase servo gain when 0.25s slices amplitudes and/or phases don't match:
-  double noiseSquelch = (1 - sqrt(fabs(magOffset))) * (1 - sqrt(fabs(phaseDifference) / PI)); 
-
-  if (AverageTimeFrames && frameType == 't' && second >= 20 && (second < 43 || second > 46)) { // avoid averaging minutes LSBs which change
-    static double avgPhase[60]; // for each second in minute frame
-    static int noiseAvgCount = 1;
-    avgPhase[second] += normalize(phase - avgPhase[second]) / noiseAvgCount * noiseSquelch;
-    phase = avgPhase[second] = normalize(avgPhase[second]); // use avg vs. noise
-    if (second == 58 && noiseAvgCount < MaxNoiseAvgCount) ++noiseAvgCount; // once a minute
-  }
-
+void adjustPhase(double& phase, double magOffsetDifference, double phaseDifference) {
   // ?? better PID servo to handle short and long-term drifts vs. noise?
   double bitPhase = normalize(phase - avgPhaseOffset);  // should be near 0 or +/-PI
   double phaseOfs = fmod(bitPhase + TwoPI + PI/2, PI) - PI/2;   // -PI/2..PI/2, independent of phase inversion
 
   static int phaseAvgCount = 1;
+  // reduce phase servo gain when 0.25s slices amplitudes and/or phases don't match:
+  // typical noise-free phase difference: <= 4 degrees; squelch phase servo gain above that
+  double noiseSquelch = (1 - fabs(magOffsetDifference)) * (1 - min(pow(phaseDifference / PI * phaseAvgCount, 2), 1)); // TODO: adjust
+
   avgPhaseOffset += lastCorrection = phaseOfs / phaseAvgCount * noiseSquelch;
   if (phaseAvgCount < MaxPhaseAvgCount) ++phaseAvgCount;
 
@@ -374,7 +366,7 @@ void processBuffer(int b) {
   double q3PhaseOfs = normalize(TwoPI * WWVBHz * (bufferStartSeconds + slice3StartSample / SampleHz));
   double phase = normalize((slice3.ph + slice4.ph) / 2 - q3PhaseOfs);
 
-  adjustPhase(phase, magOffset, phaseDifference); 
+  adjustPhase(phase, magOffset - avgMagOfs, phaseDifference); 
 
   if (second == 12 && systemTime.wYear) // sync bits received
     checkFrameType();
