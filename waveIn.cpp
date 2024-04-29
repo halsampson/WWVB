@@ -1,8 +1,6 @@
 #include "waveIn.h"
 
-#include <windows.h>
 #include <stdio.h>
-#include <mmsystem.h>
 #pragma comment(lib, "Winmm.lib")
 
 const unsigned short MicLevel = 65535;
@@ -14,32 +12,27 @@ const unsigned short MicLevel = 65535;
 #define BITS_PER_SAMPLE 16
 #define WAV_IN_SAMPLE_HZ 192000  // requested standard nominal value
 
+const int NUM_WAV_BUFFERS = 3;
+
+const int BufferSamples = int(SampleHz + 0.5);
+
 short wavInBuf[NUM_WAV_BUFFERS][BufferSamples];
 
-void (*waveInRdyCallback)(int b, int samplesRecorded);
+void (*waveInRdyCallback)(WAVEHDR* wh);
 
 HWAVEIN hwi;
 WAVEHDR wih[NUM_WAV_BUFFERS]; 
 
-int samplesRecorded;
-
-bool waveInReady() {
-  bool waveInReady = false;
-   for (int b = 0; b < NUM_WAV_BUFFERS; ++b) {
-    if (wih[b].dwFlags & WHDR_DONE || !wih[b].dwFlags) {
-      if (wih[b].dwFlags & WHDR_DONE) {  
-        (*waveInRdyCallback)(b, samplesRecorded);
-        waveInReady = true;
-        waveInUnprepareHeader(hwi, &wih[b], sizeof(WAVEHDR));
-      }
-      
-      wih[b].dwBufferLength = BufferSamples * WAV_IN_CHANNELS * BITS_PER_SAMPLE / 8;
-      wih[b].lpData = (LPSTR)&wavInBuf[b];
-      MMRESULT res = waveInPrepareHeader(hwi, &wih[b], sizeof(WAVEHDR));
-      res = waveInAddBuffer(hwi, &wih[b], sizeof(WAVEHDR));
+void waveInReady(WAVEHDR* wh) {
+  if (wh->dwFlags & WHDR_DONE || !wh->dwFlags) {
+    if (wh->dwFlags & WHDR_DONE) {
+      (*waveInRdyCallback)(wh);
+      waveInUnprepareHeader(hwi, wh, sizeof(WAVEHDR));
     }
+      
+    MMRESULT res = waveInPrepareHeader(hwi, wh, sizeof(WAVEHDR));
+    res = waveInAddBuffer(hwi, wh, sizeof(WAVEHDR));    
   }
-  return waveInReady;
 }
 
 void setMicLevel(int wavInDevID, unsigned short micLevel) {
@@ -108,13 +101,11 @@ void CALLBACK waveInProc(
    DWORD_PTR dwInstance,
    DWORD_PTR dwParam1,
    DWORD_PTR dwParam2) {
-  if (uMsg == WIM_DATA) {
-    samplesRecorded = ((WAVEHDR*)dwParam1)->dwBytesRecorded / sizeof(wavInBuf[0][0]);
-    waveInReady(); // ((WAVEHDR*)dwParam1)->lpData;
-  }
+  if (uMsg == WIM_DATA) 
+    waveInReady((WAVEHDR*)dwParam1); 
 }
 
-void setupAudioIn(const char* deviceName, void (*waveInRdy)(int b, int samplesRecorded)) {
+void setupAudioIn(const char* deviceName, void (*waveInRdy)(WAVEHDR* wh)) {
   waveInRdyCallback = waveInRdy;
 
   int wavInDevID = -1;
@@ -141,7 +132,11 @@ void setupAudioIn(const char* deviceName, void (*waveInRdy)(int b, int samplesRe
   
   setMicLevel(wavInDevID, MicLevel);
 
-  waveInReady();
+  for (int b = 0; b < NUM_WAV_BUFFERS; ++b) {
+    wih[b].lpData = (LPSTR)wavInBuf[b];
+    wih[b].dwBufferLength = BufferSamples * WAV_IN_CHANNELS * BITS_PER_SAMPLE / 8;
+    waveInReady(&wih[b]);
+  }
 }
 
 #define POWER_REQ

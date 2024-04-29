@@ -36,7 +36,7 @@ const int  MaxPhaseAvgCount = 8;  // TODO: adjust phase servo gain for best trac
 
 // correlate errors with line Hz = WWVBHz / 1001 = 59.94 Hz or / 999 = 60.06 Hz
 
-const int SamplingOffset_ms = -1000/4 + 170; // to center sample buffer on 2nd half of bit time (want slice3StartSample ~ BufferSamples / 4)
+const int SamplingOffset_ms = -1000/4 + 170; // to center sample buffer on 2nd half of bit time (want slice3StartSample ~ bufferSamples / 4)
 const int MaxOffsetAvgCount = 60 - 6 - 1; // decaying average over reporting minute
 
 // TODO: Try I Q (I V ?) separation into more common 48kHz stereo sampling (Note many mic inputs are mono, so amplify for line inputs)
@@ -282,15 +282,18 @@ void setExpectedBits() {
 }
 
 double bufferStartSeconds;
+int bufferSamples;
 
 FILE* fMagPh;
 
 bool needResynch;
 int lastCallbackMillisec;
 
-void processBuffer(int b) {
+void processBuffer(short* wavInBuf) {
   static double avgMag = 100, avgMagOfs, avgPhaseDifference;
   static long long sumSquares;
+  
+  second = int(fmod(bufferStartSeconds + 0.5, 60));
 
   if (second == 0) {
     printfLog("\n");
@@ -306,7 +309,7 @@ void processBuffer(int b) {
     lastCallbackMillisec = systemTime.wMilliseconds;  
       // will change by up to +/- 0.5 sample * 60 seconds / 192000 = 0.16 ms / minute = +/- 2.6ppm
       // plus system clock off by ?? ppm
-      // --> need circular audio buffer or variable BufferSamples to keep centered
+      // --> need circular audio buffer or slightly variable bufferSamples to keep centered
     printfLog("%2d:%02d:%02d.%03d ", systemTime.wHour, systemTime.wMinute, systemTime.wSecond, systemTime.wMilliseconds);
     printfLog("%+4.0fms ", avgMagOfs * 500); 
 
@@ -354,35 +357,35 @@ void processBuffer(int b) {
     return; // don't process low signal marker seconds
   }
 
-  for (int s = 0; s < BufferSamples; ++s)
-    sumSquares += wavInBuf[b][s] * wavInBuf[b][s];
+  for (int s = 0; s < bufferSamples; ++s)
+    sumSquares += wavInBuf[s] * wavInBuf[s];
 
   // process last half of bit time where amplitude is always high
-  int slice3StartSample = (int)round(fmod((bufferStartSeconds + 0.5) * SampleHz, BufferSamples));  // ~ BufferSamples / 4
-  int slice3EndSample = slice3StartSample + BufferSamples / 4;
-  int slice4EndSample = slice3EndSample + BufferSamples / 4;
+  int slice3StartSample = (int)round(fmod((bufferStartSeconds + 0.5) * SampleHz, bufferSamples));  // ~ bufferSamples / 4
+  int slice3EndSample = slice3StartSample + bufferSamples / 4;
+  int slice4EndSample = slice3EndSample + bufferSamples / 4;
 
-  if (slice4EndSample > BufferSamples) {
-    if (slice4EndSample >= BufferSamples * 17 / 16) { // off end by 1/4 of 1/4 buffer slice = 62.5 ms + 250 ms / 0.156ms = (as often as every 33 minutes)
+  if (slice4EndSample > bufferSamples) {
+    if (slice4EndSample >= bufferSamples * 17 / 16) { // off end by 1/4 of 1/4 buffer slice = 62.5 ms + 250 ms / 0.156ms = (as often as every 33 minutes)
       // TODO: better circular audio buffer feeding slices when ready
       needResynch = true;
       printf("S");
       return;
     }
-    slice4EndSample = BufferSamples;
+    slice4EndSample = bufferSamples;
   }
 
-  MagPhase slice3 = processSlice(slice3StartSample, slice3EndSample, wavInBuf[b]); // bit start + 0.5..0.75s
-  MagPhase slice4 = processSlice(slice3EndSample, slice4EndSample, wavInBuf[b]);  // bit start + 0.75..1.0s 
+  MagPhase slice3 = processSlice(slice3StartSample, slice3EndSample, wavInBuf); // bit start + 0.5..0.75s
+  MagPhase slice4 = processSlice(slice3EndSample, slice4EndSample, wavInBuf);  // bit start + 0.75..1.0s 
   double totalMag = slice3.mag + slice4.mag; 
  
   // overlap when lineHz * 1000 +/- odd N = WWVBHz;  lineHz = WWVBHz / 1001 = 59.94Hz
   // measure next odd harmonic: lineHz * 1003 = WWVBHz * 1003 / 1001
-  lineHzInterfere = max(processSlice(0, BufferSamples, wavInBuf[b], 1003 * WWVBHz / 1001.).mag / totalMag, lineHzInterfere); 
+  lineHzInterfere = max(processSlice(0, bufferSamples, wavInBuf, 1003 * WWVBHz / 1001.).mag / totalMag, lineHzInterfere); 
   // positive deviation harmonics almost same:  1001 / 999 ~ 1003 / 1001 within 4ppm
 
   // also 120 Hz * 500 +/- odd N = WWVBHz lineHz = 59.88 Hz (rare - 2 sigma?)
-  // lineHzInterfere = max(processSlice(0, BufferSamples, wavInBuf[b], WWVBHz * 503 /  501.).mag / totalMag, lineHzInterfere);  // 120 Hz rarer
+  // lineHzInterfere = max(processSlice(0, bufferSamples, wavInBuf[b], WWVBHz * 503 /  501.).mag / totalMag, lineHzInterfere);  // 120 Hz rarer
 
   // TODO: more squelch when line Hz odd overtones coincide
 
@@ -418,17 +421,17 @@ void processBuffer(int b) {
   avgPhaseOffset = normalize(avgPhaseOffset);
 }
 
-void audioReadyCallback(int b, int samplesRecorded) {
-  second = int(fmod(bufferStartSeconds + 0.5, 60));
-  if (samplesRecorded == BufferSamples)
-    processBuffer(b);
-  else {
+void audioReadyCallback(WAVEHDR* wh) {
+  if (wh->dwBytesRecorded == wh->dwBufferLength) {
+    bufferSamples = wh->dwBytesRecorded / sizeof(short);
+    processBuffer((short*)wh->lpData);
+  } else {
     printf("b");
     avgPhaseOffset += lastCorrection;
   }
-  bufferStartSeconds += samplesRecorded / SampleHz; // next buffer start time
+  bufferStartSeconds += bufferSamples / SampleHz; // next buffer start time
   // TODO: samples might be discontinuous -- check for sudden jump in avgMagOffset and resync
-  // TODO: treat audio buffes a circular and/or adjust BufferSmaples to stay centered
+  // TODO: treat audio buffers as circular and/or adjust BufferSmaples to stay centered
 }
 
 void alignOutput() {

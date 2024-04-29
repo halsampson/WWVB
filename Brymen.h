@@ -1,5 +1,7 @@
 #pragma once
 
+// Brymen BM857 DMM support
+
 bool openBrymen();
 void closeBrymen();
 

@@ -3,6 +3,8 @@
 #include "Brymen.h"
 #include "sserial.h"
 
+// Brymen BM857 DMM support
+
 const char* comPort = "COM31"; // Fixed by serial number; Tx = DTR
 const int Brymen857Baud = 1000000 / 128;  // 128us per bit
 
@@ -188,7 +190,7 @@ double getReading() {
   dcb.fDtrControl = DTR_CONTROL_DISABLE;
   SetCommState(hBrymen, &dcb);
   
-  if (bytesRead != RawLen) return 0;
+  if (bytesRead != RawLen) return 0; // or MinErrVal
   
   return decodeRaw();
 }
