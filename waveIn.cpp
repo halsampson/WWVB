@@ -23,18 +23,6 @@ void (*waveInRdyCallback)(WAVEHDR* wh);
 HWAVEIN hwi;
 WAVEHDR wih[NUM_WAV_BUFFERS]; 
 
-void waveInReady(WAVEHDR* wh) {
-  if (wh->dwFlags & WHDR_DONE || !wh->dwFlags) {
-    if (wh->dwFlags & WHDR_DONE) {
-      (*waveInRdyCallback)(wh);
-      waveInUnprepareHeader(hwi, wh, sizeof(WAVEHDR));
-    }
-      
-    MMRESULT res = waveInPrepareHeader(hwi, wh, sizeof(WAVEHDR));
-    res = waveInAddBuffer(hwi, wh, sizeof(WAVEHDR));    
-  }
-}
-
 void setMicLevel(int wavInDevID, unsigned short micLevel) {
   MMRESULT result;
   HMIXER hMixer;
@@ -95,12 +83,13 @@ void setMicLevel(int wavInDevID, unsigned short micLevel) {
   result = mixerSetControlDetails((HMIXEROBJ) hMixer, &mcd, MIXER_SETCONTROLDETAILSF_VALUE);
 }
 
-void CALLBACK waveInProc(
-   HWAVEIN   hwi,
-   UINT      uMsg,
-   DWORD_PTR dwInstance,
-   DWORD_PTR dwParam1,
-   DWORD_PTR dwParam2) {
+void waveInReady(WAVEHDR* wh) {
+  WAVEHDR whIn = *wh;
+  MMRESULT res = waveInAddBuffer(hwi, wh, sizeof(WAVEHDR));  // resets WAVEHDR
+  (*waveInRdyCallback)(&whIn);
+}
+
+void CALLBACK waveInProc(HWAVEIN hwi, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2) {
   if (uMsg == WIM_DATA) 
     waveInReady((WAVEHDR*)dwParam1); 
 }
@@ -135,7 +124,8 @@ void setupAudioIn(const char* deviceName, void (*waveInRdy)(WAVEHDR* wh)) {
   for (int b = 0; b < NUM_WAV_BUFFERS; ++b) {
     wih[b].lpData = (LPSTR)wavInBuf[b];
     wih[b].dwBufferLength = BufferSamples * WAV_IN_CHANNELS * BITS_PER_SAMPLE / 8;
-    waveInReady(&wih[b]);
+    MMRESULT res = waveInPrepareHeader(hwi, &wih[b], sizeof(WAVEHDR)); // lock buffer
+    res = waveInAddBuffer(hwi, &wih[b], sizeof(WAVEHDR));
   }
 }
 
@@ -162,6 +152,9 @@ void startWaveIn() {
 
 void stopWaveIn() {
   waveInStop(hwi);
+  for (int b = 0; b < NUM_WAV_BUFFERS; ++b) 
+    waveInUnprepareHeader(hwi, &wih[b], sizeof(WAVEHDR));
+
 #ifdef POWER_REQ
   PowerClearRequest(hPCR, PowerRequestExecutionRequired);
   PowerClearRequest(hPCR, PowerRequestDisplayRequired);

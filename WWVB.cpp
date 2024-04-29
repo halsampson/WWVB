@@ -18,7 +18,9 @@
 double clockOffSeconds = 0.034; // check with https://nist.time.gov/  "Your clock is off by: ____"  or USE_NTP
 // #define USE_NTP
 
-// TODO: Use 3 one second buffers, circular, wait so slice crossing buffer boundary is ready
+// TODO: Why does buffer ready callback time fall behind by more than (0.5 sample / 192000 samples/sec = 2.6 us) * 60 sec = 156us / minute ???  *****
+
+// TODO: Use 3 one second buffers, circular; wait so any slice crossing buffer boundary is fully ready
 
 // TODO: auto-sync start of seconds, minutes: initial sync words search
 //   see AM decoding at https://github.com/jepler/cwwvb
@@ -346,7 +348,8 @@ void processBuffer(short* wavInBuf) {
       printfLog("%3.0f", 10 * log10((double)sumSquares / (60 - 7)) - 20 * log10(avgMag)); // Noise / Signal
       sumSquares = 0;
 
-      printfLog("%3.0f %2d", 99 * worstLineHarmonics / 60, worstSecond); 
+      printfLog("%2.0f", 10 * worstLineHarmonics / 60); 
+      // printfLog(" %2d", worstSecond); 
       worstLineHarmonics = 0;
 
       printfLog("%+5.1f", avgPhaseDifference * 180 / PI); // degrees
@@ -433,13 +436,14 @@ void audioReadyCallback(WAVEHDR* wh) {
 
 void alignOutput() {
   printf("\n   UTC        Align ");
-  // 3 seconds of buffers?
-  int startSecond = int(fmod(bufferStartSeconds + 0.5, 60));
-  if (startSecond >= 9) {
-    printf("Received "); // 9 long
-    startSecond -= 9;
-  }
-  for (int i = 0; i < startSecond; ++i) printf(" ");
+  int secondPos = int(fmod(bufferStartSeconds + 0.5, 60));
+  if (secondPos >= 12) secondPos += 3; // header check
+
+  const char Rcvd[] = "Received ";
+  if (secondPos >= strlen(Rcvd))
+    secondPos -= printf(Rcvd);
+  
+  for (int i = 0; i < secondPos; ++i) printf(" ");
 }
 
 void startAudioIn() {
@@ -466,7 +470,7 @@ void startAudioIn() {
   lastCallbackMillisec = -1;
   bufferStartSeconds = fmod(ntp + stWis - stNtp, 60); // approx recording start time
   clockOffSeconds = fmod(stNtp - fmod(ntp, 60) + 60 + 30,  60) - 30;  // -: CPU behind
-  printf("\n%.3fs   (PC clock off %+.3fs)", bufferStartSeconds, clockOffSeconds); 
+  printf("\n%.3fs       (PC clock off %+.3fs)", bufferStartSeconds, clockOffSeconds); 
   alignOutput();
   setExpectedBits();
 }
@@ -521,10 +525,12 @@ int main() {
       Sleep(5 * 60 * 1000);  // prevent possible NTP DoS
     #endif
     } else {
+#if 1
       requestReading();
       Sleep(300);  // 5 readings per sec
       lineHz = fastGetReading();
-      Sleep(200);
+#endif
+      Sleep(500);
     }
   }
 
