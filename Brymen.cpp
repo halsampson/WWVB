@@ -8,7 +8,7 @@
 const char* comPort = "COM31"; // Fixed by serial number; Tx = DTR
 const int Brymen857Baud = 1000000 / 128;  // 128us per bit
 
-const int RawLen = 35;
+const int RawLen = 35; 
 
 const double MinErrVal = 1E9;
 
@@ -167,7 +167,7 @@ void getUnits(void) {  // sets 3 strings above
 }
 
 double decodeRaw(bool doUnits = true) {
-  if (!packRaw()) return 9E9;
+  if (!packRaw()) return MinErrVal;
 
   double reading = getLcdValue();
   if (doUnits) getUnits();
@@ -190,7 +190,7 @@ double getReading() {
   dcb.fDtrControl = DTR_CONTROL_DISABLE;
   SetCommState(hBrymen, &dcb);
   
-  if (bytesRead != RawLen) return 0; // or MinErrVal
+  if (bytesRead != RawLen) return MinErrVal;
   
   return decodeRaw();
 }
@@ -201,7 +201,7 @@ double fastGetReading() {
 
   dcb.fDtrControl = DTR_CONTROL_DISABLE;
   SetCommState(hBrymen, &dcb);
-  return 0;
+  return MinErrVal;
 }
 
 bool openBrymen() {

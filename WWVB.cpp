@@ -289,6 +289,8 @@ FILE* fMagPh;
 bool needResynch;
 int lastCallbackMillisec;
 
+double lineHz = 60;
+
 void processBuffer(short* wavInBuf) {
   static double avgMag = 100, avgMagOfs, avgPhaseDifference;
   static long long sumSquares;
@@ -323,16 +325,11 @@ void processBuffer(short* wavInBuf) {
   static double worstLineHarmonics;
   static int worstSecond;
 
-  if (second % 2 == 0) {
-    requestReading();
-  } else {
-    double lineHz = fastGetReading();
-    if (lineHz > 0) {
-      double lineHarmonicAlignment = fabs(fmod(lineHz * 1001 - WWVBHz + 240, 120) - 60);
-      if (lineHarmonicAlignment > worstLineHarmonics) {
-        worstLineHarmonics = lineHarmonicAlignment; // bad interference at 0, ~ +/- N * 120
-        worstSecond = second;
-      }
+  if (lineHz < MinErrVal) {
+    double lineHarmonicAlignment = fabs(fmod(lineHz * 1001 - WWVBHz + 240, 120) - 60);
+    if (lineHarmonicAlignment > worstLineHarmonics) {
+      worstLineHarmonics = lineHarmonicAlignment; // bad interference at 0, ~ +/- N * 120
+      worstSecond = second;
     }
   }
 
@@ -358,7 +355,7 @@ void processBuffer(short* wavInBuf) {
   }
 
   for (int s = 0; s < bufferSamples; ++s)
-    sumSquares += wavInBuf[s] * wavInBuf[s];
+    sumSquares += (int)wavInBuf[s] * wavInBuf[s];
 
   // process last half of bit time where amplitude is always high
   int slice3StartSample = (int)round(fmod((bufferStartSeconds + 0.5) * SampleHz, bufferSamples));  // ~ bufferSamples / 4
@@ -523,7 +520,12 @@ int main() {
     #ifdef USE_NTP
       Sleep(5 * 60 * 1000);  // prevent possible NTP DoS
     #endif
-    } else Sleep(500);
+    } else {
+      requestReading();
+      Sleep(300);  // 5 readings per sec
+      lineHz = fastGetReading();
+      Sleep(200);
+    }
   }
 
   return 0;
