@@ -180,17 +180,26 @@ void requestReading() {
 }
 
 double getReading() {
-  dcb.fDtrControl = DTR_CONTROL_ENABLE; // low -> IRED on
-  SetCommState(hBrymen, &dcb);
+  requestReading();
 
-  DWORD bytesRead;
-  if (!ReadFile(hBrymen, raw, RawLen, &bytesRead, NULL)) return 0;
-  if (bytesRead != RawLen) return 9E9;  // TODO: retry
-
+  DWORD bytesRead = 0;
+  ReadFile(hBrymen, raw, RawLen, &bytesRead, NULL);
+  
   dcb.fDtrControl = DTR_CONTROL_DISABLE;
   SetCommState(hBrymen, &dcb);
   
+  if (bytesRead != RawLen) return 0;
+  
   return decodeRaw();
+}
+
+double fastGetReading() {
+  if (rxRdy() >= RawLen)
+    return getReading();
+
+  dcb.fDtrControl = DTR_CONTROL_DISABLE;
+  SetCommState(hBrymen, &dcb);
+  return 0;
 }
 
 bool openBrymen() {

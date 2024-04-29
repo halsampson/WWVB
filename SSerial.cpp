@@ -24,3 +24,10 @@ HANDLE openSerial(const char* portName, int baudRate) {
 
   return hCom;
 }
+
+int rxRdy() {
+	COMSTAT cs;
+	DWORD commErrors;
+	if (!ClearCommError(hCom, &commErrors, &cs)) return -1;
+	return cs.cbInQue;
+}

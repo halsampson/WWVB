@@ -317,8 +317,21 @@ void processBuffer(int b) {
     }
   }
 
-  if (second == 58)
+  static double worstLineHarmonics;
+  static int worstSecond;
+
+  if (second % 2 == 0) {
     requestReading();
+  } else {
+    double lineHz = fastGetReading();
+    if (lineHz > 0) {
+      double lineHarmonicAlignment = fabs(fmod(lineHz * 1001 - WWVBHz + 240, 120) - 60);
+      if (lineHarmonicAlignment > worstLineHarmonics) {
+        worstLineHarmonics = lineHarmonicAlignment; // bad interference at 0, ~ +/- N * 120
+        worstSecond = second;
+      }
+    }
+  }
 
   if (second % 60 == 0 || second % 10 == 9) { // marker second -- low signal
     printfLog("%c", frameType);  
@@ -333,10 +346,10 @@ void processBuffer(int b) {
       printfLog("%3.0f", 10 * log10((double)sumSquares / (60 - 7)) - 20 * log10(avgMag)); // Noise / Signal
       sumSquares = 0;
 
-      printfLog("%+5.1f", avgPhaseDifference * 180 / PI); // degrees
+      printfLog("%3.0f %2d", 99 * worstLineHarmonics / 60, worstSecond); 
+      worstLineHarmonics = 0;
 
-      double lineHz = getReading();
-      printfLog("%+4.0f", lineHz * 1001 - WWVBHz); // bad interference at 0, ~ +/- N * 120
+      printfLog("%+5.1f", avgPhaseDifference * 180 / PI); // degrees
     }
     return; // don't process low signal marker seconds
   }
@@ -421,7 +434,7 @@ void audioReadyCallback(int b, int samplesRecorded) {
 void alignOutput() {
   printf("\n   UTC        Align ");
   // 3 seconds of buffers?
-  int startSecond = int(fmod(bufferStartSeconds + 3 + 0.5, 60));
+  int startSecond = int(fmod(bufferStartSeconds + 0.5, 60));
   if (startSecond >= 9) {
     printf("Received "); // 9 long
     startSecond -= 9;
@@ -460,6 +473,7 @@ void startAudioIn() {
 
 int main() {
   openBrymen();
+  requestReading();
 
 #ifdef START_AT_HOUR // PDT: delayed clean night higher SNR start
   const int SecsPerHour = 60 * 60;
