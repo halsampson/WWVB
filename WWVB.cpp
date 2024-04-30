@@ -16,7 +16,6 @@
 
 // #define START_AT_HOUR 1 
 double clockOffSeconds = 0.034; // check with https://nist.time.gov/  "Your clock is off by: ____"  or USE_NTP
-// #define USE_NTP
 
 // TODO: Why does buffer ready callback time fall behind by more than (0.5 sample / 192000 samples/sec = 2.6 us) * 60 sec = 156us / minute ???  *****
 
@@ -39,7 +38,9 @@ const int  MaxPhaseAvgCount = 8;  // TODO: adjust phase servo gain for best trac
 // correlate errors with line Hz = WWVBHz / 1001 = 59.94 Hz or / 999 = 60.06 Hz
 
 const int SamplingOffset_ms = -1000/4 + 170; // to center sample buffer on 2nd half of bit time (want slice3StartSample ~ bufferSamples / 4)
-const int MaxOffsetAvgCount = 60 - 6 - 1; // decaying average over reporting minute
+
+const int StrongSignalSeconds = 60 - 6 - 1; // markers at second == 0 and % 10 == 9
+const int MaxOffsetAvgCount = StrongSignalSeconds; // decaying average over reporting minute
 
 // TODO: Try I Q (I V ?) separation into more common 48kHz stereo sampling (Note many mic inputs are mono, so amplify for line inputs)
 
@@ -167,7 +168,7 @@ int second;
 double avgPhaseOffset, lastCorrection;
 
 double cleanPhaseOffsetTotal;
-int cleanPhaseOffsetCount;
+double cleanPhaseOffsetCount;
 
 FILE* fLog;
 
@@ -208,10 +209,8 @@ void adjustPhase(double& phase, double magOffsetDifference, double phaseDifferen
   avgPhaseOffset += lastCorrection = phaseOfs / phaseAvgCount * noiseSquelch;
   if (phaseAvgCount < MaxPhaseAvgCount) ++phaseAvgCount;
 
-  if (fabs(phaseDifference) < PI / 16) { // clean phase measurement threshold
-    cleanPhaseOffsetTotal += phaseOfs;  // per second;  ?biases?
-    ++cleanPhaseOffsetCount;
-  }
+  cleanPhaseOffsetTotal += phaseOfs * noiseSquelch;  // per second; ? marker bias?
+  cleanPhaseOffsetCount += noiseSquelch;
 
   bool phaseInverted = fabs(normalize(phase - avgPhaseOffset)) >= PI/2;
   int bit = phaseInverted ? 1 : 0; 
@@ -302,7 +301,6 @@ void processBuffer(short* wavInBuf) {
   if (second == 0) {
     printfLog("\n");
 
-    errCount = 0;
     rcvdBits = 0;
     setExpectedBits();
 
@@ -340,12 +338,16 @@ void processBuffer(short* wavInBuf) {
     avgPhaseOffset += lastCorrection;
 
     if (second == 59) {
+      if (errCount > StrongSignalSeconds / 2) errCount = StrongSignalSeconds - errCount; // mostly inverted
       printfLog(" %2d", errCount);
+      if (errCount > 16 && fabs(avgMagOfs) > 0.2) // beware startup
+        needResynch = true;
+      errCount = 0;
       
       printf("%3.0f", 10 * log10(lineHzInterfere) + 10); // Noise / Signal
       lineHzInterfere = 0;
       
-      printfLog("%3.0f", 10 * log10((double)sumSquares / (60 - 7)) - 20 * log10(avgMag)); // Noise / Signal
+      printfLog("%3.0f", 10 * log10((double)sumSquares / StrongSignalSeconds) - 20 * log10(avgMag)); // Noise / Signal
       sumSquares = 0;
 
       printfLog("%2.0f", 10 * worstLineHarmonics / 60); 
@@ -446,13 +448,13 @@ void alignOutput() {
   for (int i = 0; i < secondPos; ++i) printf(" ");
 }
 
-void startAudioIn() {
+void startAudioIn(bool useNTP = false) {
   double ntp = 0;
 
-#ifdef USE_NTP // TODO: once, then use system time and clockOffSeconds
+// TODO: once, then use system time and clockOffSeconds
   extern double ntpTime();
-  ntp = ntpTime(); 
-#endif
+  if (useNTP)
+    ntp = ntpTime(); 
 
   SYSTEMTIME nearNTP_time; GetSystemTime(&nearNTP_time);
   double stNtp = nearNTP_time.wSecond + nearNTP_time.wMilliseconds / 1000.;
@@ -497,13 +499,19 @@ int main() {
       case 'f' : {
         double avgPhaseOffsetPerSec = cleanPhaseOffsetTotal / cleanPhaseOffsetCount;
         double avgCyclesPerSecOffset = avgPhaseOffsetPerSec / TwoPI;   // cycles of WWVBHz per second
-        double SampleHzError = avgCyclesPerSecOffset * WWVBHz / SampleHz;
-        printf("\nSampleHz off by: %+.4f Hz, should be: %.6f", SampleHzError, SampleHz + SampleHzError);  // TODO: check calc by changing SampleHz ***
+        double secsPerSecError = avgCyclesPerSecOffset / WWVBHz;
+        double avgSampleHzError = secsPerSecError * SampleHz; 
+        printf("\nSampleHz off by: %+.4f Hz, should be: %.6f", avgSampleHzError, SampleHz + 2 * avgSampleHzError);  // TODO: check calc by changing SampleHz ***
            // full run average, so SampleHzError * 2 to compare with 1PPS change from last check
 
-        cleanPhaseOffsetTotal = cleanPhaseOffsetCount = 0;
+        cleanPhaseOffsetTotal = cleanPhaseOffsetCount = 0;  // * 2 not valid for later 'f'
         alignOutput();
         }
+        break;
+
+      case 'n' :
+        stopWaveIn();
+        startAudioIn(true);
         break;
 
       case 'r' : needResynch = true; break;
@@ -521,9 +529,6 @@ int main() {
       needResynch = false;
       stopWaveIn();
       startAudioIn();
-    #ifdef USE_NTP
-      Sleep(5 * 60 * 1000);  // prevent possible NTP DoS
-    #endif
     } else {
 #if 1
       requestReading();
